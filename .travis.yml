@@ -21,6 +21,7 @@ jobs:
     - stage: deploy
       name: deploy
       sudo: required
+      rust: ignore
       script: skip
       services:
         - docker
