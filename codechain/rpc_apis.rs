@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use ccore::{AccountProvider, Client, Miner};
+use ccore::{AccountProvider, Client, Miner, ShardValidator};
 use cnetwork::NetworkControl;
 use crpc::{MetaIoHandler, Params, Value};
 
@@ -25,18 +25,24 @@ pub struct ApiDependencies {
     pub miner: Arc<Miner>,
     pub network_control: Arc<NetworkControl>,
     pub account_provider: Arc<AccountProvider>,
+    pub shard_validator: Option<Arc<ShardValidator>>,
 }
 
 impl ApiDependencies {
-    pub fn extend_api(&self, handler: &mut MetaIoHandler<()>) {
+    pub fn extend_api(&self, enable_devel_api: bool, handler: &mut MetaIoHandler<()>) {
         use crpc::v1::*;
         handler.extend_with(ChainClient::new(&self.client, &self.miner).to_delegate());
-        handler.extend_with(DevelClient::new(&self.client).to_delegate());
+        if enable_devel_api {
+            handler.extend_with(DevelClient::new(&self.client).to_delegate());
+        }
         handler.extend_with(MinerClient::new(&self.client, &self.miner).to_delegate());
         handler.extend_with(NetClient::new(&self.network_control).to_delegate());
         handler.extend_with(
             AccountClient::new(&self.account_provider, self.client.engine().params().network_id).to_delegate(),
         );
+        self.shard_validator.as_ref().map(|shard_validator| {
+            handler.extend_with(ShardValidatorClient::new(Arc::clone(&shard_validator)).to_delegate());
+        });
     }
 }
 

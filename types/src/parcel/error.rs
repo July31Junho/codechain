@@ -20,6 +20,7 @@ use ckey::{Address, Error as KeyError};
 use primitives::{H256, U256};
 use unexpected::Mismatch;
 
+use super::super::transaction::Error as TransactionError;
 use super::super::ShardId;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -70,6 +71,11 @@ pub enum Error {
     InvalidSignature(String),
     InconsistentShardOutcomes,
     ParcelsTooBig,
+    RegularKeyAlreadyInUse,
+    RegularKeyAlreadyInUseAsMaster,
+    InvalidTransferDestination,
+    /// Transaction error
+    InvalidTransaction(TransactionError),
 }
 
 impl Display for Error {
@@ -101,6 +107,10 @@ impl Display for Error {
             Error::InvalidSignature(err) => format!("Parcel has invalid signature: {}.", err),
             Error::InconsistentShardOutcomes => "Shard outcomes are inconsistent".to_string(),
             Error::ParcelsTooBig => "Parcel size exceeded the body size limit".to_string(),
+            Error::RegularKeyAlreadyInUse => "The regular key is already registered to another account".to_string(),
+            Error::RegularKeyAlreadyInUseAsMaster => "The regular key is already used as a master account".to_string(),
+            Error::InvalidTransferDestination => "Transfer receiver is not valid account".to_string(),
+            Error::InvalidTransaction(err) => format!("Parcel has an invalid transaction: {}", err).to_string(),
         };
 
         f.write_fmt(format_args!("Parcel error ({})", msg))
@@ -110,5 +120,11 @@ impl Display for Error {
 impl From<KeyError> for Error {
     fn from(err: KeyError) -> Self {
         Error::InvalidSignature(format!("{}", err))
+    }
+}
+
+impl From<TransactionError> for Error {
+    fn from(err: TransactionError) -> Self {
+        Error::InvalidTransaction(err)
     }
 }

@@ -60,8 +60,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_dirs::AppInfo;
 use ccore::{
-    AccountProvider, Client, ClientService, EngineType, Miner, MinerOptions, MinerService, Spec, Stratum,
-    StratumConfig, StratumError,
+    AccountProvider, Client, ClientService, EngineType, Miner, MinerOptions, MinerService, ShardValidator,
+    ShardValidatorConfig, Spec, Stratum, StratumConfig, StratumError,
 };
 use cdiscovery::{KademliaConfig, KademliaExtension, UnstructuredConfig, UnstructuredExtension};
 use ckeystore::accounts_dir::RootDiskDirectory;
@@ -70,7 +70,6 @@ use clap::ArgMatches;
 use clogger::LoggerConfig;
 use cnetwork::{NetworkConfig, NetworkControl, NetworkControlError, NetworkService, SocketAddr};
 use creactor::EventLoop;
-use cstate::{ActionHandler, HitHandler};
 use csync::{BlockSyncExtension, ParcelSyncExtension, SnapshotService};
 use ctrlc::CtrlC;
 use fdlimit::raise_fd_limit;
@@ -146,6 +145,22 @@ pub fn stratum_start(cfg: &StratumConfig, miner: Arc<Miner>, client: Arc<Client>
             Ok(())
         }
     }
+}
+
+fn new_shard_validator(config: ShardValidatorConfig, ap: Arc<AccountProvider>) -> Result<Arc<ShardValidator>, String> {
+    let account = {
+        let password = match config.password_path {
+            None => None,
+            Some(password_path) => {
+                let content = fs::read_to_string(password_path).map_err(|e| format!("{:?}", e))?;
+                let password = content.lines().next().ok_or("Password file is empty")?;
+                Some(password.to_string())
+            }
+        };
+        Some((config.account, password))
+    };
+    let shard_validator = ShardValidator::new(account, Arc::clone(&ap));
+    Ok(shard_validator)
 }
 
 #[cfg(all(unix, target_arch = "x86_64"))]
@@ -266,9 +281,7 @@ fn run_node(matches: ArgMatches) -> Result<(), String> {
     let _event_loop = EventLoop::spawn();
     let config = load_config(&matches)?;
 
-    // Add handlers here to accept additional custom actions
-    let custom_action_handlers: Vec<Arc<ActionHandler>> = vec![Arc::new(HitHandler::new())];
-    let spec = config.operating.chain.spec(custom_action_handlers)?;
+    let spec = config.operating.chain.spec()?;
 
     let instance_id = config.operating.instance_id.unwrap_or(
         SystemTime::now()
@@ -287,6 +300,16 @@ fn run_node(matches: ArgMatches) -> Result<(), String> {
     let ap = AccountProvider::new(keystore);
     let miner = new_miner(&config, &spec, ap.clone())?;
     let client = client_start(&config, &spec, miner.clone())?;
+
+
+    let shard_validator = if spec.params().use_shard_validator {
+        None
+    } else if config.shard_validator.disable {
+        Some(ShardValidator::new(None, Arc::clone(&ap)))
+    } else {
+        let shard_validator_config = (&config.shard_validator).into();
+        Some(new_shard_validator(shard_validator_config, Arc::clone(&ap))?)
+    };
 
     let network_service: Arc<NetworkControl> = {
         if !config.network.disable {
@@ -311,6 +334,10 @@ fn run_node(matches: ArgMatches) -> Result<(), String> {
                 service.register_extension(consensus_extension)?;
             }
 
+            if let Some(shard_validator) = &shard_validator {
+                service.register_extension(shard_validator.clone())?;
+            }
+
             for address in network_config.bootstrap_addresses {
                 service.connect_to(address)?;
             }
@@ -325,12 +352,13 @@ fn run_node(matches: ArgMatches) -> Result<(), String> {
         miner: Arc::clone(&miner),
         network_control: Arc::clone(&network_service),
         account_provider: ap,
+        shard_validator,
     });
 
     let _rpc_server = {
         if !config.rpc.disable {
             let rpc_config = (&config.rpc).into();
-            Some(rpc_http_start(rpc_config, Arc::clone(&rpc_apis_deps))?)
+            Some(rpc_http_start(rpc_config, config.rpc.enable_devel_api, Arc::clone(&rpc_apis_deps))?)
         } else {
             None
         }
@@ -339,7 +367,7 @@ fn run_node(matches: ArgMatches) -> Result<(), String> {
     let _ipc_server = {
         if !config.ipc.disable {
             let ipc_config = (&config.ipc).into();
-            Some(rpc_ipc_start(ipc_config, Arc::clone(&rpc_apis_deps))?)
+            Some(rpc_ipc_start(ipc_config, config.rpc.enable_devel_api, Arc::clone(&rpc_apis_deps))?)
         } else {
             None
         }

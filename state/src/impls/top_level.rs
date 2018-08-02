@@ -39,14 +39,14 @@ use std::cell::RefMut;
 use std::fmt;
 
 use ccrypto::BLAKE_NULL_RLP;
-use ckey::{Address, Public};
+use ckey::{public_to_address, Address, Public};
+use cmerkle::{Result as TrieResult, Trie, TrieError, TrieFactory};
 use ctypes::invoice::Invoice;
 use ctypes::parcel::{Action, ChangeShard, Error as ParcelError, Outcome as ParcelOutcome, Parcel};
 use ctypes::transaction::{Error as TransactionError, Outcome as TransactionOutcome, Transaction};
 use ctypes::ShardId;
 use primitives::{Bytes, H256, U256};
 use rlp::NULL_RLP;
-use trie::{Result as TrieResult, Trie, TrieError, TrieFactory};
 use unexpected::Mismatch;
 
 use super::super::backend::TopBackend;
@@ -54,8 +54,8 @@ use super::super::checkpoint::{CheckpointId, StateWithCheckpoint};
 use super::super::item::cache::{Cache, CacheableItem};
 use super::super::traits::{ShardState, ShardStateInfo, StateWithCache, TopState, TopStateInfo};
 use super::super::{
-    Account, Asset, AssetAddress, AssetScheme, AssetSchemeAddress, Metadata, MetadataAddress, Shard, ShardAddress,
-    ShardLevelState,
+    Account, Asset, AssetAddress, AssetScheme, AssetSchemeAddress, Metadata, MetadataAddress, RegularAccount,
+    RegularAccountAddress, Shard, ShardAddress, ShardLevelState,
 };
 use super::super::{StateDB, StateError, StateResult};
 
@@ -107,6 +107,7 @@ pub struct TopLevelState {
     db: StateDB,
     root: H256,
     account: Cache<Account>,
+    regular_account: Cache<RegularAccount>,
     metadata: Cache<Metadata>,
     shard: Cache<Shard>,
     action_data: Cache<Bytes>,
@@ -177,6 +178,7 @@ impl StateWithCheckpoint for TopLevelState {
     fn create_checkpoint(&mut self, id: CheckpointId) {
         self.id_of_checkpoints.push(id);
         self.account.checkpoint();
+        self.regular_account.checkpoint();
         self.metadata.checkpoint();
         self.shard.checkpoint();
         self.action_data.checkpoint();
@@ -187,6 +189,7 @@ impl StateWithCheckpoint for TopLevelState {
         assert_eq!(expected, id);
 
         self.account.discard_checkpoint();
+        self.regular_account.discard_checkpoint();
         self.metadata.discard_checkpoint();
         self.shard.discard_checkpoint();
         self.action_data.discard_checkpoint();
@@ -197,6 +200,7 @@ impl StateWithCheckpoint for TopLevelState {
         assert_eq!(expected, id);
 
         self.account.revert_to_checkpoint();
+        self.regular_account.revert_to_checkpoint();
         self.metadata.revert_to_checkpoint();
         self.shard.revert_to_checkpoint();
         self.action_data.revert_to_checkpoint();
@@ -207,6 +211,7 @@ impl StateWithCache for TopLevelState {
     fn commit(&mut self) -> TrieResult<()> {
         let mut trie = self.trie_factory.from_existing(self.db.as_hashdb_mut(), &mut self.root)?;
         self.account.commit(&mut trie)?;
+        self.regular_account.commit(&mut trie)?;
         self.metadata.commit(&mut trie)?;
         self.shard.commit(&mut trie)?;
         self.action_data.commit(&mut trie)?;
@@ -217,6 +222,9 @@ impl StateWithCache for TopLevelState {
         let ref mut db = self.db;
         self.account.propagate_to_global_cache(|address, item, modified| {
             db.add_to_account_cache(address, item, modified);
+        });
+        self.regular_account.propagate_to_global_cache(|address, item, modified| {
+            db.add_to_regular_account_cache(address, item, modified);
         });
         self.metadata.propagate_to_global_cache(|address, item, modified| {
             db.add_to_metadata_cache(address, item, modified);
@@ -231,6 +239,7 @@ impl StateWithCache for TopLevelState {
 
     fn clear(&mut self) {
         self.account.clear();
+        self.regular_account.clear();
         self.metadata.clear();
         self.shard.clear();
         self.action_data.clear();
@@ -251,6 +260,7 @@ impl TopLevelState {
             db,
             root,
             account: Cache::new(),
+            regular_account: Cache::new(),
             metadata: Cache::new(),
             shard: Cache::new(),
             action_data: Cache::new(),
@@ -269,6 +279,7 @@ impl TopLevelState {
             db,
             root,
             account: Cache::new(),
+            regular_account: Cache::new(),
             metadata: Cache::new(),
             shard: Cache::new(),
             action_data: Cache::new(),
@@ -291,10 +302,15 @@ impl TopLevelState {
 
     /// Execute a given parcel, charging parcel fee.
     /// This will change the state accordingly.
-    pub fn apply(&mut self, parcel: &Parcel, fee_payer: &Address) -> StateResult<ParcelOutcome> {
+    pub fn apply(
+        &mut self,
+        parcel: &Parcel,
+        fee_payer: &Address,
+        fee_payer_public: &Public,
+    ) -> StateResult<ParcelOutcome> {
         self.create_checkpoint(PARCEL_FEE_CHECKPOINT);
 
-        match self.apply_internal(parcel, fee_payer) {
+        match self.apply_internal(parcel, fee_payer, fee_payer_public) {
             Err(StateError::Transaction(_)) => unreachable!(),
             Err(err) => {
                 self.revert_to_checkpoint(PARCEL_FEE_CHECKPOINT);
@@ -308,7 +324,12 @@ impl TopLevelState {
         }
     }
 
-    fn apply_internal(&mut self, parcel: &Parcel, fee_payer: &Address) -> StateResult<ParcelOutcome> {
+    fn apply_internal(
+        &mut self,
+        parcel: &Parcel,
+        fee_payer: &Address,
+        fee_payer_public: &Public,
+    ) -> StateResult<ParcelOutcome> {
         let nonce = self.nonce(fee_payer)?;
 
         if parcel.nonce != nonce {
@@ -334,7 +355,7 @@ impl TopLevelState {
         // The failed parcel also must pay the fee and increase nonce.
         self.create_checkpoint(PARCEL_ACTION_CHECKPOINT);
 
-        match self.apply_action(&parcel.action, &parcel.network_id, fee_payer) {
+        match self.apply_action(&parcel.action, &parcel.network_id, fee_payer, fee_payer_public) {
             Ok(outcome) => {
                 self.discard_checkpoint(PARCEL_ACTION_CHECKPOINT);
                 Ok(outcome)
@@ -346,11 +367,18 @@ impl TopLevelState {
         }
     }
 
-    fn apply_action(&mut self, action: &Action, network_id: &u64, fee_payer: &Address) -> StateResult<ParcelOutcome> {
+    fn apply_action(
+        &mut self,
+        action: &Action,
+        network_id: &u64,
+        fee_payer: &Address,
+        fee_payer_public: &Public,
+    ) -> StateResult<ParcelOutcome> {
         match action {
             Action::ChangeShardState {
                 transactions,
                 changes,
+                signatures: _,
             } => {
                 if changes.len() == 0 {
                     return Ok(ParcelOutcome::Transactions(vec![]))
@@ -367,6 +395,7 @@ impl TopLevelState {
                 }
 
                 let first_result = self.apply_transactions_with_check(&transactions, &changes[0])?;
+
                 for change in changes.iter().skip(1) {
                     let result = self.apply_transactions_with_check(&transactions, change)?;
                     if result != first_result {
@@ -395,7 +424,7 @@ impl TopLevelState {
             },
             Action::SetRegularKey {
                 key,
-            } => match self.set_regular_key(fee_payer, key) {
+            } => match self.set_regular_key(fee_payer_public, key) {
                 Ok(()) => Ok(ParcelOutcome::Single {
                     invoice: Invoice::Success,
                     error: None,
@@ -438,7 +467,6 @@ impl TopLevelState {
         }
 
         let (new_shard_root, db, results) = self.apply_transactions_internal(transactions, shard_id, shard_root)?;
-
         if !change.post_root.is_zero() && change.post_root != new_shard_root {
             return Err(ParcelError::InvalidShardRoot(Mismatch {
                 expected: new_shard_root,
@@ -510,16 +538,68 @@ impl TopLevelState {
     fn ensure_account_cached<F, U>(&self, a: &Address, f: F) -> TrieResult<U>
     where
         F: Fn(Option<&Account>) -> U, {
+        let a = if self.regular_account_exists_and_not_null(a)? {
+            let regular_account = self.require_regular_account_from_address(a)?;
+            public_to_address(&regular_account.master_account())
+        } else {
+            a.clone()
+        };
+
+        self.ensure_master_account_cached(&a, f)
+    }
+
+    /// Same with ensure_master_account.
+    /// But do not pass regular_account redirection
+    fn ensure_master_account_cached<F, U>(&self, a: &Address, f: F) -> TrieResult<U>
+    where
+        F: Fn(Option<&Account>) -> U, {
         let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
         let from_global_cache = |a| self.db.get_cached_account_with(a, |acc| f(acc.map(|a| &*a)));
-        self.account.ensure_cached(a, &f, db, from_global_cache)
+        self.account.ensure_cached(&a, &f, db, from_global_cache)
     }
 
     fn require_account<'a>(&'a self, a: &Address) -> TrieResult<RefMut<'a, Account>> {
+        // Change the address to a master address if a regular key exists.
+
+        let a = if self.regular_account_exists_and_not_null(a)? {
+            let regular_account = self.require_regular_account_from_address(a)?;
+            public_to_address(&regular_account.master_account())
+        } else {
+            a.clone()
+        };
+
         let default = || Account::new(0u8.into(), 0.into());
         let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
-        let from_db = || self.db.get_cached_account(a);
-        self.account.require_item_or_from(a, default, db, from_db)
+        let from_db = || self.db.get_cached_account(&a);
+        self.account.require_item_or_from(&a, default, db, from_db)
+    }
+
+    /// Check caches for required data
+    /// First searches for regular account in the local, then the shared cache.
+    /// Populates local cache if nothing found.
+    fn ensure_regular_account_cached<F, U>(&self, a: &Address, f: F) -> TrieResult<U>
+    where
+        F: Fn(Option<&RegularAccount>) -> U, {
+        let a = RegularAccountAddress::from_address(a);
+        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let from_global_cache = |a| self.db.get_cached_regular_account_with(a, |acc| f(acc.map(|a| &*a)));
+        self.regular_account.ensure_cached(&a, &f, db, from_global_cache)
+    }
+
+    fn require_regular_account<'a>(&'a self, public: &Public) -> TrieResult<RefMut<'a, RegularAccount>> {
+        let regular_account_address = RegularAccountAddress::new(public);
+        let default = || RegularAccount::new(Public::default());
+        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let from_db = || self.db.get_cached_regular_account(&regular_account_address);
+        self.regular_account.require_item_or_from(&regular_account_address, default, db, from_db)
+    }
+
+    fn require_regular_account_from_address<'a>(&'a self, a: &Address) -> TrieResult<RefMut<'a, RegularAccount>> {
+        let regular_account_address = RegularAccountAddress::from_address(a);
+        let default = || RegularAccount::new(Public::default());
+        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let from_db = || self.db.get_cached_regular_account(&regular_account_address);
+        self.regular_account.require_item_or_from(&regular_account_address, default, db, from_db)
     }
 
     fn require_metadata<'a>(&'a self) -> TrieResult<RefMut<'a, Metadata>> {
@@ -549,6 +629,7 @@ impl TopLevelState {
 impl fmt::Debug for TopLevelState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "account: {:?}", self.account)?;
+        writeln!(f, "regular_account: {:?}", self.regular_account)?;
         writeln!(f, "metadata: {:?}", self.metadata)?;
         writeln!(f, "shard: {:?}", self.shard)?;
         writeln!(f, "action_data: {:?}", self.action_data)?;
@@ -565,6 +646,7 @@ impl Clone for TopLevelState {
             root: self.root.clone(),
             id_of_checkpoints: self.id_of_checkpoints.clone(),
             account: self.account.clone(),
+            regular_account: self.regular_account.clone(),
             metadata: self.metadata.clone(),
             shard: self.shard.clone(),
             action_data: self.action_data.clone(),
@@ -576,6 +658,10 @@ impl Clone for TopLevelState {
 impl TopState<StateDB> for TopLevelState {
     fn kill_account(&mut self, account: &Address) {
         self.account.remove(account);
+    }
+
+    fn kill_regular_account(&mut self, account: &Public) {
+        self.regular_account.remove(&RegularAccountAddress::new(account));
     }
 
     fn account_exists(&self, a: &Address) -> TrieResult<bool> {
@@ -590,6 +676,14 @@ impl TopState<StateDB> for TopLevelState {
 
     fn account_exists_and_has_nonce(&self, a: &Address) -> TrieResult<bool> {
         self.ensure_account_cached(a, |a| a.map_or(false, |a| !a.nonce().is_zero()))
+    }
+
+    fn master_account_exists_and_not_null(&self, a: &Address) -> TrieResult<bool> {
+        self.ensure_master_account_cached(a, |a| a.map_or(false, |a| !a.is_null()))
+    }
+
+    fn regular_account_exists_and_not_null(&self, a: &Address) -> TrieResult<bool> {
+        self.ensure_regular_account_cached(a, |a| a.map_or(false, |a| !a.is_null()))
     }
 
     fn add_balance(&mut self, a: &Address, incr: &U256) -> TrieResult<()> {
@@ -618,6 +712,9 @@ impl TopState<StateDB> for TopLevelState {
                 balance,
             }.into())
         }
+        if self.regular_account_exists_and_not_null(to)? {
+            return Err(ParcelError::InvalidTransferDestination.into())
+        }
         self.sub_balance(from, by)?;
         self.add_balance(to, by)?;
         Ok(())
@@ -628,8 +725,36 @@ impl TopState<StateDB> for TopLevelState {
         Ok(())
     }
 
-    fn set_regular_key(&mut self, a: &Address, key: &Public) -> StateResult<()> {
-        self.require_account(a)?.set_regular_key(key);
+    fn set_regular_key(&mut self, master_public: &Public, regular_key: &Public) -> StateResult<()> {
+        let master_address = public_to_address(master_public);
+
+        let (master_public, master_address) = if self.regular_account_exists_and_not_null(&master_address)? {
+            let regular_account = self.require_regular_account_from_address(&master_address)?;
+            let master_public = regular_account.master_account().clone();
+            let master_address = public_to_address(&master_public);
+            (master_public, master_address)
+        } else {
+            (*master_public, public_to_address(&master_public))
+        };
+
+        let regular_address = public_to_address(regular_key);
+        if self.regular_account_exists_and_not_null(&regular_address)? {
+            return Err(ParcelError::RegularKeyAlreadyInUse.into())
+        }
+
+        if self.master_account_exists_and_not_null(&regular_address)? {
+            return Err(ParcelError::RegularKeyAlreadyInUseAsMaster.into())
+        }
+
+        let prev_regular_key = self.require_account(&master_address)?.regular_key();
+
+        if let Some(prev_regular_key) = prev_regular_key {
+            self.kill_regular_account(&prev_regular_key);
+        }
+
+        let mut master_account = self.require_account(&master_address)?;
+        master_account.set_regular_key(regular_key);
+        self.require_regular_account(&regular_key)?.set_master_account(&master_public);
         Ok(())
     }
 
@@ -835,7 +960,7 @@ mod tests_state {
         let a = Address::zero();
         state.require_account(&a).unwrap();
         state.commit().unwrap();
-        assert_eq!(*state.root(), "27a2e0676e24a2d55dd6bc3ad8ec876108a47e70534ea49718a1f76d5c05479e".into());
+        assert_eq!(*state.root(), "db4046bb91a12a37cbfb0f09631aad96a97248423163eca791e19b430cc7fe4a".into());
     }
 
     #[test]
@@ -906,9 +1031,9 @@ mod tests_parcel {
     use super::super::super::tests::helpers::get_temp_state;
     use super::*;
 
-    fn address() -> Address {
+    fn address() -> (Address, Public) {
         let keypair = Random.generate().unwrap();
-        keypair.address()
+        (keypair.address(), keypair.public().clone())
     }
 
     #[test]
@@ -924,12 +1049,13 @@ mod tests_parcel {
             action: Action::ChangeShardState {
                 transactions: vec![],
                 changes: vec![],
+                signatures: vec![],
             },
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &20.into()).unwrap();
 
-        match state.apply(&parcel, &sender).unwrap() {
+        match state.apply(&parcel, &sender, &sender_public).unwrap() {
             ParcelOutcome::Transactions(res) => {
                 assert!(res.is_empty());
             }
@@ -950,12 +1076,13 @@ mod tests_parcel {
             action: Action::ChangeShardState {
                 transactions: vec![],
                 changes: vec![],
+                signatures: vec![],
             },
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &20.into()).unwrap();
 
-        match state.apply(&parcel, &sender) {
+        match state.apply(&parcel, &sender, &sender_public) {
             Err(StateError::Parcel(err)) => {
                 assert_eq!(
                     ParcelError::InvalidNonce {
@@ -982,12 +1109,13 @@ mod tests_parcel {
             action: Action::ChangeShardState {
                 transactions: vec![],
                 changes: vec![],
+                signatures: vec![],
             },
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &4.into()).unwrap();
 
-        match state.apply(&parcel, &sender) {
+        match state.apply(&parcel, &sender, &sender_public) {
             Err(StateError::Parcel(err)) => {
                 assert_eq!(
                     ParcelError::InsufficientBalance {
@@ -1018,7 +1146,7 @@ mod tests_parcel {
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &20.into()).unwrap();
 
         assert_eq!(
@@ -1026,7 +1154,7 @@ mod tests_parcel {
                 invoice: Invoice::Success,
                 error: None,
             },
-            state.apply(&parcel, &sender).unwrap()
+            state.apply(&parcel, &sender, &sender_public).unwrap()
         );
 
         assert_eq!(Ok(10.into()), state.balance(&receiver));
@@ -1047,7 +1175,7 @@ mod tests_parcel {
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &5.into()).unwrap();
 
         assert_eq!(state.regular_key(&sender), Ok(None));
@@ -1056,9 +1184,214 @@ mod tests_parcel {
                 invoice: Invoice::Success,
                 error: None
             },
-            state.apply(&parcel, &sender).unwrap()
+            state.apply(&parcel, &sender, &sender_public).unwrap()
         );
         assert_eq!(Ok(Some(key)), state.regular_key(&sender));
+    }
+
+    #[test]
+    fn should_use_master_balance_when_signed_with_regular_key() {
+        let mut state = get_temp_state();
+        let regular_keypair = Random.generate().unwrap();
+        let key = regular_keypair.public();
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetRegularKey {
+                key: key.clone(),
+            },
+            nonce: 0.into(),
+            network_id: 0xCA,
+        };
+        let (sender, sender_public) = address();
+        state.add_balance(&sender, &15.into()).unwrap();
+
+        assert_eq!(state.regular_key(&sender), Ok(None));
+        assert_eq!(
+            ParcelOutcome::Single {
+                invoice: Invoice::Success,
+                error: None
+            },
+            state.apply(&parcel, &sender, &sender_public).unwrap()
+        );
+        assert_eq!(Ok(Some(*key)), state.regular_key(&sender));
+
+        let parcel = Parcel {
+            action: Action::CreateShard,
+            fee: 5.into(),
+            nonce: 1.into(),
+            network_id: 0xCA,
+        };
+
+        assert_eq!(
+            ParcelOutcome::Single {
+                invoice: Invoice::Success,
+                error: None
+            },
+            state.apply(&parcel, &regular_keypair.address(), regular_keypair.public()).unwrap()
+        );
+        assert_eq!(Ok(4.into()), state.balance(&sender));
+    }
+
+    #[test]
+    fn should_fail_when_two_accounts_used_the_same_regular_key() {
+        let mut state = get_temp_state();
+        let regular_keypair = Random.generate().unwrap();
+        let key = regular_keypair.public();
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetRegularKey {
+                key: key.clone(),
+            },
+            nonce: 0.into(),
+            network_id: 0xCA,
+        };
+        let (sender, sender_public) = address();
+        state.add_balance(&sender, &15.into()).unwrap();
+
+        assert_eq!(state.regular_key(&sender), Ok(None));
+        assert_eq!(
+            ParcelOutcome::Single {
+                invoice: Invoice::Success,
+                error: None
+            },
+            state.apply(&parcel, &sender, &sender_public).unwrap()
+        );
+        assert_eq!(Ok(Some(*key)), state.regular_key(&sender));
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetRegularKey {
+                key: key.clone(),
+            },
+            nonce: 0.into(),
+            network_id: 0xCA,
+        };
+        let (sender2, sender_public2) = address();
+        state.add_balance(&sender2, &15.into()).unwrap();
+
+        match state.apply(&parcel, &sender2, &sender_public2) {
+            Err(StateError::Parcel(err)) => assert_eq!(ParcelError::RegularKeyAlreadyInUse, err),
+            other => panic!("{:?}", other),
+        }
+        assert_eq!(Ok(None), state.regular_key(&sender2));
+    }
+
+    #[test]
+    fn should_fail_when_regular_key_is_already_registered_as_master_key() {
+        let (sender, sender_public) = address();
+        let (sender2, sender_public2) = address();
+
+        let mut state = get_temp_state();
+
+        state.add_balance(&sender, &20.into()).unwrap();
+        state.add_balance(&sender2, &20.into()).unwrap();
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetRegularKey {
+                key: sender_public2.clone(),
+            },
+            nonce: 0.into(),
+            network_id: 0xCA,
+        };
+
+        match state.apply(&parcel, &sender, &sender_public) {
+            Err(StateError::Parcel(err)) => assert_eq!(ParcelError::RegularKeyAlreadyInUseAsMaster, err),
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn should_be_able_to_change_regular_key() {
+        let (sender, sender_public) = address();
+        let (regular_address, regular_public) = address();
+        let (_, regular_public2) = address();
+
+        let mut state = get_temp_state();
+
+        state.add_balance(&sender, &20.into()).unwrap();
+        state.set_regular_key(&sender_public, &regular_public).unwrap();
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetRegularKey {
+                key: regular_public2,
+            },
+            nonce: 0.into(),
+            network_id: 0xCA,
+        };
+
+        assert_eq!(Some(regular_public), state.regular_key(&sender).unwrap());
+        assert_eq!(Ok(true), state.regular_account_exists_and_not_null(&regular_address));
+        assert_eq!(
+            ParcelOutcome::Single {
+                invoice: Invoice::Success,
+                error: None
+            },
+            state.apply(&parcel, &regular_address, &regular_public).unwrap()
+        );
+        assert_eq!(Ok(false), state.regular_account_exists_and_not_null(&regular_address));
+        assert_eq!(Some(regular_public2), state.regular_key(&sender).unwrap());
+    }
+
+    #[test]
+    fn should_be_able_to_use_deleted_regular_key_as_master_key() {
+        let (sender, sender_public) = address();
+        let (regular_address, regular_public) = address();
+        let (_, regular_public2) = address();
+
+        let mut state = get_temp_state();
+
+        state.add_balance(&sender, &20.into()).unwrap();
+        state.set_regular_key(&sender_public, &regular_public).unwrap();
+        state.set_regular_key(&sender_public, &regular_public2).unwrap();
+
+        assert_eq!(Ok(false), state.regular_account_exists_and_not_null(&regular_address));
+        state.add_balance(&regular_address, &20.into()).unwrap();
+
+        let parcel = Parcel {
+            action: Action::CreateShard,
+            fee: 5.into(),
+            nonce: 0.into(),
+            network_id: 0xCA,
+        };
+        assert_eq!(
+            ParcelOutcome::Single {
+                invoice: Invoice::Success,
+                error: None
+            },
+            state.apply(&parcel, &regular_address, &regular_public).unwrap()
+        );
+        assert_eq!(Ok(14.into()), state.balance(&regular_address));
+        assert_eq!(Ok(20.into()), state.balance(&sender));
+    }
+
+    #[test]
+    fn should_fail_when_someone_sends_some_ccc_to_an_address_which_used_as_a_regular_key() {
+        let (sender, sender_public) = address();
+        let (regular_address, regular_public) = address();
+
+        let mut state = get_temp_state();
+
+        state.add_balance(&sender, &20.into()).unwrap();
+        state.set_regular_key(&sender_public, &regular_public).unwrap();
+
+        let parcel = Parcel {
+            action: Action::Payment {
+                receiver: regular_address,
+                amount: 5.into(),
+            },
+            fee: 5.into(),
+            nonce: 0.into(),
+            network_id: 0xCA,
+        };
+        match state.apply(&parcel, &sender, &sender_public) {
+            Err(StateError::Parcel(err)) => assert_eq!(ParcelError::InvalidTransferDestination, err),
+            other => panic!("{:?}", other),
+        }
+        assert_eq!(Ok(20.into()), state.balance(&sender));
     }
 
     #[test]
@@ -1075,7 +1408,7 @@ mod tests_parcel {
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &20.into()).unwrap();
 
         assert_eq!(
@@ -1087,7 +1420,7 @@ mod tests_parcel {
                     cost: 30.into(),
                 })
             },
-            state.apply(&parcel, &sender).unwrap()
+            state.apply(&parcel, &sender, &sender_public).unwrap()
         );
 
         assert_eq!(Ok(0.into()), state.balance(&receiver));
@@ -1128,14 +1461,15 @@ mod tests_parcel {
                 transactions,
                 changes: vec![ChangeShard {
                     shard_id,
-                    pre_root: H256::from("0xdd99c22174c7c1f12523c51d2555803c06c2932085d66ad870a4f6b35ddc47e0"),
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
                     post_root: H256::zero(),
                 }],
+                signatures: vec![],
             },
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
 
         state.add_balance(&sender, &U256::from(69u64)).unwrap();
 
@@ -1144,7 +1478,7 @@ mod tests_parcel {
                 invoice: Invoice::Success,
                 error: None,
             }]),
-            state.apply(&parcel, &sender).unwrap()
+            state.apply(&parcel, &sender, &sender_public).unwrap()
         );
 
         assert_eq!(state.balance(&sender), Ok(58.into()));
@@ -1191,14 +1525,15 @@ mod tests_parcel {
                 transactions,
                 changes: vec![ChangeShard {
                     shard_id,
-                    pre_root: H256::from("0xdd99c22174c7c1f12523c51d2555803c06c2932085d66ad870a4f6b35ddc47e0"),
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
                     post_root: H256::zero(),
                 }],
+                signatures: vec![],
             },
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
 
         state.add_balance(&sender, &U256::from(69u64)).unwrap();
 
@@ -1207,7 +1542,7 @@ mod tests_parcel {
                 invoice: Invoice::Success,
                 error: None,
             }]),
-            state.apply(&parcel, &sender).unwrap()
+            state.apply(&parcel, &sender, &sender_public).unwrap()
         );
 
         assert_eq!(state.balance(&sender), Ok(64.into()));
@@ -1304,12 +1639,13 @@ mod tests_parcel {
                 transactions,
                 changes: vec![ChangeShard {
                     shard_id,
-                    pre_root: H256::from("0xdd99c22174c7c1f12523c51d2555803c06c2932085d66ad870a4f6b35ddc47e0"),
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
                     post_root: H256::zero(),
                 }],
+                signatures: vec![],
             },
         };
-        let sender = address();
+        let (sender, sender_public) = address();
 
         state.add_balance(&sender, &U256::from(120)).unwrap();
 
@@ -1324,7 +1660,7 @@ mod tests_parcel {
                     error: None,
                 },
             ]),
-            state.apply(&parcel, &sender).unwrap()
+            state.apply(&parcel, &sender, &sender_public).unwrap()
         );
 
         assert_eq!(state.balance(&sender), Ok(100.into()));
@@ -1384,12 +1720,13 @@ mod tests_parcel {
                 transactions: vec![mint],
                 changes: vec![ChangeShard {
                     shard_id,
-                    pre_root: H256::from("0xdd99c22174c7c1f12523c51d2555803c06c2932085d66ad870a4f6b35ddc47e0"),
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
                     post_root: H256::zero(),
                 }],
+                signatures: vec![],
             },
         };
-        let sender = address();
+        let (sender, sender_public) = address();
 
         state.add_balance(&sender, &U256::from(120)).unwrap();
 
@@ -1398,9 +1735,8 @@ mod tests_parcel {
                 invoice: Invoice::Success,
                 error: None,
             }]),
-            state.apply(&mint_parcel, &sender).unwrap()
+            state.apply(&mint_parcel, &sender, &sender_public).unwrap()
         );
-
         assert_eq!(state.balance(&sender), Ok(100.into()));
         assert_eq!(state.nonce(&sender), Ok(1.into()));
 
@@ -1457,9 +1793,10 @@ mod tests_parcel {
                 transactions: vec![transfer],
                 changes: vec![ChangeShard {
                     shard_id,
-                    pre_root: H256::from("0x0ff1490ead36267f025c0ac335b0749eb502c8f74393ec781c68b4d2dcf3d9fd"),
+                    pre_root: H256::from("0x3e56ec350ed779120d7b27472aef08fefa0e72165206275efa0b4c8419ba26db"),
                     post_root: H256::zero(),
                 }],
+                signatures: vec![],
             },
         };
 
@@ -1468,7 +1805,7 @@ mod tests_parcel {
                 invoice: Invoice::Success,
                 error: None,
             }]),
-            state.apply(&transfer_parcel, &sender).unwrap()
+            state.apply(&transfer_parcel, &sender, &sender_public).unwrap()
         );
 
         assert_eq!(state.balance(&sender), Ok(70.into()));
@@ -1528,9 +1865,9 @@ mod tests_parcel {
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &20.into()).unwrap();
-        let res = state.apply(&parcel, &sender).unwrap();
+        let res = state.apply(&parcel, &sender, &sender_public).unwrap();
         assert_eq!(
             ParcelOutcome::Single {
                 invoice: Invoice::Success,
@@ -1553,9 +1890,9 @@ mod tests_parcel {
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &20.into()).unwrap();
-        let res = state.apply(&parcel, &sender).unwrap();
+        let res = state.apply(&parcel, &sender, &sender_public).unwrap();
         assert_eq!(
             ParcelOutcome::Single {
                 invoice: Invoice::Success,
@@ -1580,9 +1917,9 @@ mod tests_parcel {
             nonce: 0.into(),
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &20.into()).unwrap();
-        let res = state.apply(&parcel, &sender).unwrap();
+        let res = state.apply(&parcel, &sender, &sender_public).unwrap();
         assert_eq!(
             ParcelOutcome::Single {
                 invoice: Invoice::Success,
@@ -1630,14 +1967,15 @@ mod tests_parcel {
                     pre_root: H256::zero(),
                     post_root: H256::zero(),
                 }],
+                signatures: vec![],
             },
             network_id: 0xCA,
         };
-        let sender = address();
+        let (sender, sender_public) = address();
 
         state.add_balance(&sender, &U256::from(69u64)).unwrap();
 
-        match state.apply(&parcel, &sender).unwrap_err() {
+        match state.apply(&parcel, &sender, &sender_public).unwrap_err() {
             StateError::Parcel(err) => assert_eq!(ParcelError::InvalidShardId(0), err),
             other => panic!("{:?}", other),
         }
@@ -1698,13 +2036,14 @@ mod tests_parcel {
                     pre_root: H256::zero(),
                     post_root: H256::zero(),
                 }],
+                signatures: vec![],
             },
         };
 
-        let sender = address();
+        let (sender, sender_public) = address();
         state.add_balance(&sender, &U256::from(120)).unwrap();
 
-        match state.apply(&parcel, &sender).unwrap_err() {
+        match state.apply(&parcel, &sender, &sender_public).unwrap_err() {
             StateError::Parcel(err) => assert_eq!(ParcelError::InvalidShardId(100), err),
             other => panic!("{:?}", other),
         }

@@ -19,13 +19,13 @@ use std::collections::HashSet;
 use ccrypto::BLAKE_NULL_RLP;
 use ckey::Address;
 use cmerkle::skewed_merkle_root;
+use cmerkle::TrieFactory;
 use cstate::{StateDB, StateError, StateWithCache, TopLevelState};
 use ctypes::invoice::{Invoice, ParcelInvoice};
 use ctypes::machine::{LiveBlock, Parcels};
 use ctypes::parcel::{Error as ParcelError, Outcome as ParcelOutcome};
 use primitives::{Bytes, H256};
 use rlp::{Decodable, DecoderError, Encodable, RlpStream, UntrustedRlp};
-use trie::TrieFactory;
 use unexpected::Mismatch;
 
 use super::consensus::CodeChainEngine;
@@ -155,7 +155,7 @@ impl<'x> OpenBlock<'x> {
             return Err(StateError::Parcel(ParcelError::ParcelAlreadyImported).into())
         }
 
-        let outcomes = self.block.state.apply(&parcel, parcel.sender())?;
+        let outcomes = self.block.state.apply(&parcel, parcel.sender(), &parcel.public_key())?;
 
         self.block.parcels_set.insert(h.unwrap_or_else(|| parcel.hash()));
         self.block.parcels.push(parcel.into());
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn open_block() {
-        let spec = Spec::new_test(Vec::new());
+        let spec = Spec::new_test();
         let genesis_header = spec.genesis_header();
         let db = spec.ensure_genesis_state(get_temp_state_db(), &Default::default()).unwrap();
         let b = OpenBlock::new(&*spec.engine, Default::default(), db, &genesis_header, Address::zero(), vec![], false)

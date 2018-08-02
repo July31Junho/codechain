@@ -14,15 +14,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-extern crate ethcore_bytes as ebytes;
-extern crate ethereum_types;
+use ckey::Address;
 
-mod hash;
-
-pub use self::hash::{H1024, H128, H160, H256, H264, H32, H512, H520, H64};
-pub use ebytes::Bytes;
-pub use ethereum_types::{U128, U256, U512};
-
-pub mod bytes {
-    pub use ebytes::ToPretty;
+pub struct ShardValidatorConfig {
+    pub account: Address,
+    pub password_path: Option<String>,
 }

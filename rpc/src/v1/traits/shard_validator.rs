@@ -14,15 +14,17 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-extern crate ethcore_bytes as ebytes;
-extern crate ethereum_types;
+use ckey::SignatureData;
+use ctypes::parcel::Action;
+use jsonrpc_core::Result;
+use primitives::H256;
 
-mod hash;
+build_rpc_trait! {
+    pub trait ShardValidator {
+        # [rpc(name = "shardValidator_getSignatures")]
+        fn get_signatures(&self, H256) -> Result<Vec<SignatureData>>;
 
-pub use self::hash::{H1024, H128, H160, H256, H264, H32, H512, H520, H64};
-pub use ebytes::Bytes;
-pub use ethereum_types::{U128, U256, U512};
-
-pub mod bytes {
-    pub use ebytes::ToPretty;
+        # [rpc(name = "shardValidator_registerAction")]
+        fn register_action(&self, Action) -> Result<bool>;
+    }
 }

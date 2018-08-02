@@ -41,6 +41,7 @@ use cnetwork::NodeId;
 use cstate::{ActionHandler, StateDB};
 use ctypes::invoice::ParcelInvoice;
 use ctypes::parcel::{Action, Parcel};
+use ctypes::transaction::Transaction;
 use ctypes::BlockNumber;
 use journaldb;
 use kvdb_memorydb;
@@ -114,7 +115,7 @@ impl TestBlockChainClient {
 
     /// Creates new test client with specified extra data for each block
     pub fn new_with_extra_data(extra_data: Bytes) -> Self {
-        let spec = Spec::new_test(Vec::new());
+        let spec = Spec::new_test();
         TestBlockChainClient::new_with_spec_and_extra(spec, extra_data)
     }
 
@@ -201,6 +202,7 @@ impl TestBlockChainClient {
                     action: Action::ChangeShardState {
                         transactions: vec![],
                         changes: vec![],
+                        signatures: vec![],
                     },
                 };
                 let signed_parcel = SignedParcel::new_with_sign(parcel, keypair.private());
@@ -268,6 +270,7 @@ impl TestBlockChainClient {
             action: Action::ChangeShardState {
                 transactions,
                 changes: vec![],
+                signatures: vec![],
             },
         };
         let signed_parcel = SignedParcel::new_with_sign(parcel, keypair.private());
@@ -502,6 +505,10 @@ impl BlockChainClient for TestBlockChainClient {
     }
 
     fn parcel_invoice(&self, _id: ParcelId) -> Option<ParcelInvoice> {
+        unimplemented!();
+    }
+
+    fn transaction(&self, _id: TransactionId) -> Option<Transaction> {
         unimplemented!();
     }
 

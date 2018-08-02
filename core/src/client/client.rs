@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use cio::IoChannel;
 use ckey::{Address, Public};
+use cmerkle::{Result as TrieResult, TrieFactory, TrieSpec};
 use cnetwork::NodeId;
 use cstate::{
     ActionHandler, Asset, AssetAddress, AssetScheme, AssetSchemeAddress, StateDB, TopBackend, TopLevelState,
@@ -35,7 +36,6 @@ use kvdb::{DBTransaction, KeyValueDB};
 use parking_lot::{Mutex, RwLock};
 use primitives::{Bytes, H256, U256};
 use rlp::{Encodable, UntrustedRlp};
-use trie::{Result as TrieResult, TrieFactory, TrieSpec};
 
 use super::super::block::{enact, ClosedBlock, Drain, IsBlock, LockedBlock, OpenBlock, SealedBlock};
 use super::super::blockchain::{
@@ -95,8 +95,8 @@ impl Client {
         message_channel: IoChannel<ClientIoMessage>,
     ) -> Result<Arc<Client>, Error> {
         let trie_spec = match config.fat_db {
-            true => TrieSpec::Fat,
-            false => TrieSpec::Secure,
+            true => unreachable!(),
+            false => TrieSpec::Generic,
         };
 
         let trie_factory = TrieFactory::new(trie_spec);
@@ -447,6 +447,11 @@ impl BlockChainClient for Client {
         self.parcel_address(id).and_then(|address| chain.parcel_invoice(&address))
     }
 
+    fn transaction(&self, id: TransactionId) -> Option<Transaction> {
+        let chain = self.chain.read();
+        self.transaction_address(id).and_then(|address| chain.transaction(&address))
+    }
+
     fn transaction_invoice(&self, id: TransactionId) -> Option<Invoice> {
         self.transaction_address(id).and_then(|transaction_address| {
             let parcel_address = transaction_address.parcel_address.clone();
@@ -532,6 +537,7 @@ impl Importer {
 
             for block in blocks {
                 let header = &block.header;
+                ctrace!(CLIENT, "Importing block {}", header.number());
                 let is_invalid = invalid_blocks.contains(header.parent_hash());
                 if is_invalid {
                     invalid_blocks.insert(header.hash());

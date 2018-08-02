@@ -16,6 +16,7 @@
 
 extern crate byteorder;
 extern crate codechain_crypto as ccrypto;
+extern crate codechain_merkle as cmerkle;
 #[macro_use]
 extern crate codechain_logger as clogger;
 extern crate codechain_key as ckey;
@@ -29,7 +30,6 @@ extern crate kvdb_memorydb;
 extern crate log;
 extern crate lru_cache;
 extern crate parking_lot;
-extern crate patricia_trie as trie;
 extern crate primitives;
 extern crate rlp;
 #[cfg(test)]
@@ -62,6 +62,7 @@ pub use item::asset::{Asset, AssetAddress};
 pub use item::asset_scheme::{AssetScheme, AssetSchemeAddress};
 pub use item::cache::{Cache, CacheableItem};
 pub use item::metadata::{Metadata, MetadataAddress};
+pub use item::regular_account::{RegularAccount, RegularAccountAddress};
 pub use item::shard::{Shard, ShardAddress};
 pub use item::shard_metadata::{ShardMetadata, ShardMetadataAddress};
 pub use traits::{ShardState, ShardStateInfo, StateWithCache, TopState, TopStateInfo};
