@@ -20,6 +20,7 @@ use ctypes::machine::{Header, LiveBlock, Parcels, WithBalances};
 
 use self::params::SoloParams;
 use super::super::consensus::EngineType;
+use super::super::SignedParcel;
 use super::{ConsensusEngine, Seal};
 
 /// A consensus engine which does not provide any consensus mechanism.
@@ -40,7 +41,7 @@ impl<M> Solo<M> {
 
 impl<M: WithBalances> ConsensusEngine<M> for Solo<M>
 where
-    M::LiveBlock: Parcels,
+    M::LiveBlock: Parcels<Parcel = SignedParcel>,
 {
     fn name(&self) -> &str {
         "Solo"
@@ -72,7 +73,8 @@ where
 
     fn on_close_block(&self, block: &mut M::LiveBlock) -> Result<(), M::Error> {
         let author = *LiveBlock::header(&*block).author();
-        self.machine.add_balance(block, &author, &self.params.block_reward)
+        let total_reward = block.parcels().iter().fold(self.params.block_reward, |sum, parcel| sum + parcel.fee);
+        self.machine.add_balance(block, &author, &total_reward)
     }
 }
 
@@ -82,18 +84,17 @@ mod tests {
 
     use super::super::super::block::{IsBlock, OpenBlock};
     use super::super::super::header::Header;
-    use super::super::super::spec::Spec;
+    use super::super::super::scheme::Scheme;
     use super::super::super::tests::helpers::get_temp_state_db;
     use super::super::Seal;
 
     #[test]
-    fn solo_can_seal() {
-        let spec = Spec::new_test_solo();
-        let engine = &*spec.engine;
-        let db = spec.ensure_genesis_state(get_temp_state_db(), &Default::default()).unwrap();
-        let genesis_header = spec.genesis_header();
-        let b =
-            OpenBlock::new(engine, Default::default(), db, &genesis_header, Default::default(), vec![], false).unwrap();
+    fn seal() {
+        let scheme = Scheme::new_test_solo();
+        let engine = &*scheme.engine;
+        let db = scheme.ensure_genesis_state(get_temp_state_db()).unwrap();
+        let genesis_header = scheme.genesis_header();
+        let b = OpenBlock::new(engine, db, &genesis_header, Default::default(), vec![], false).unwrap();
         let parent_parcels_root = genesis_header.parcels_root().clone();
         let parent_invoices_root = genesis_header.invoices_root().clone();
         let b = b.close_and_lock(parent_parcels_root, parent_invoices_root);
@@ -103,8 +104,8 @@ mod tests {
     }
 
     #[test]
-    fn solo_cant_verify() {
-        let engine = Spec::new_test_solo().engine;
+    fn fail_to_verify() {
+        let engine = Scheme::new_test_solo().engine;
         let mut header: Header = Header::default();
 
         assert!(engine.verify_block_basic(&header).is_ok());

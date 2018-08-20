@@ -36,7 +36,7 @@ This should result in CodeChain running.
 Build Dependencies
 ==================
 
-CodeChain requires Rust version 1.26 to build. Using `rustup <https://rustup.rs/>`_ is recommended.
+CodeChain requires Rust version 1.28.0 to build. Using `rustup <https://rustup.rs/>`_ is recommended.
 
 * For Linux Systems:
 
@@ -83,3 +83,11 @@ Build as Release Version
     cargo build --release
 
 This will produce an executable in the ./target/release directory.
+
+Using CodeChain SDK
+=========================
+Before starting to use the CodeChain SDK, please install node.js by going to this `page <https://nodejs.org/en/>`_.
+
+Next, install the package with the following command:
+
+``npm install codechain-sdk`` or ``yarn add codechain-sdk``

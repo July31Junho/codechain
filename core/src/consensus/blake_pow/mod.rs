@@ -21,9 +21,9 @@ use std::cmp::{max, min};
 use byteorder::{ByteOrder, LittleEndian};
 use ccrypto::blake256;
 use ctypes::machine::WithBalances;
+use ctypes::util::unexpected::{Mismatch, OutOfBounds};
 use primitives::U256;
 use rlp::UntrustedRlp;
-use unexpected::{Mismatch, OutOfBounds};
 
 use self::params::BlakePoWParams;
 use super::super::block::{ExecutedBlock, IsBlock};
@@ -162,7 +162,8 @@ impl ConsensusEngine<CodeChainMachine> for BlakePoW {
 
     fn on_close_block(&self, block: &mut ExecutedBlock) -> Result<(), Error> {
         let author = *block.header().author();
-        self.machine.add_balance(block, &author, &self.params.block_reward)
+        let total_reward = block.parcels().iter().fold(self.params.block_reward, |sum, parcel| sum + parcel.fee);
+        self.machine.add_balance(block, &author, &total_reward)
     }
 
     fn score_to_target(&self, score: &U256) -> U256 {

@@ -39,23 +39,23 @@ use std::cell::RefMut;
 use std::fmt;
 
 use ccrypto::BLAKE_NULL_RLP;
-use ckey::{public_to_address, Address, Public};
+use ckey::{public_to_address, Address, NetworkId, Public};
 use cmerkle::{Result as TrieResult, Trie, TrieError, TrieFactory};
-use ctypes::invoice::Invoice;
-use ctypes::parcel::{Action, ChangeShard, Error as ParcelError, Outcome as ParcelOutcome, Parcel};
-use ctypes::transaction::{Error as TransactionError, Outcome as TransactionOutcome, Transaction};
-use ctypes::ShardId;
+use ctypes::invoice::{ParcelInvoice, TransactionInvoice};
+use ctypes::parcel::{Action, ChangeShard, Error as ParcelError, Parcel};
+use ctypes::transaction::Transaction;
+use ctypes::util::unexpected::Mismatch;
+use ctypes::{ShardId, WorldId};
 use primitives::{Bytes, H256, U256};
 use rlp::NULL_RLP;
-use unexpected::Mismatch;
 
 use super::super::backend::TopBackend;
 use super::super::checkpoint::{CheckpointId, StateWithCheckpoint};
 use super::super::item::cache::{Cache, CacheableItem};
 use super::super::traits::{ShardState, ShardStateInfo, StateWithCache, TopState, TopStateInfo};
 use super::super::{
-    Account, Asset, AssetAddress, AssetScheme, AssetSchemeAddress, Metadata, MetadataAddress, RegularAccount,
-    RegularAccountAddress, Shard, ShardAddress, ShardLevelState,
+    Account, AssetScheme, AssetSchemeAddress, Metadata, MetadataAddress, OwnedAsset, OwnedAssetAddress, RegularAccount,
+    RegularAccountAddress, Shard, ShardAddress, ShardLevelState, ShardMetadata, World,
 };
 use super::super::{StateDB, StateError, StateResult};
 
@@ -112,7 +112,6 @@ pub struct TopLevelState {
     shard: Cache<Shard>,
     action_data: Cache<Bytes>,
     id_of_checkpoints: Vec<CheckpointId>,
-    trie_factory: TrieFactory,
 }
 
 impl TopStateInfo for TopLevelState {
@@ -139,8 +138,50 @@ impl TopStateInfo for TopLevelState {
         }
 
         // because of lexical borrow of self.db
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         Ok(db.get_with(&shard_address, ::rlp::decode::<Shard>)?.map(|s| s.root().clone()))
+    }
+
+    fn shard_owners(&self, shard_id: ShardId) -> TrieResult<Option<Vec<Address>>> {
+        let shard_address = ShardAddress::new(shard_id);
+        let owners = self.db.get_cached_shard(&shard_address).and_then(|s| s).map(|s| s.owners().to_vec());
+        if owners.is_some() {
+            return Ok(owners)
+        }
+
+        // because of lexical borrow of self.db
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
+        Ok(db.get_with(&shard_address, ::rlp::decode::<Shard>)?.map(|s| s.owners().to_vec()))
+    }
+
+    fn shard_users(&self, shard_id: ShardId) -> TrieResult<Option<Vec<Address>>> {
+        let shard_address = ShardAddress::new(shard_id);
+        let users = self.db.get_cached_shard(&shard_address).and_then(|s| s).map(|s| s.users().to_vec());
+        if users.is_some() {
+            return Ok(users)
+        }
+
+        // because of lexical borrow of self.db
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
+        Ok(db.get_with(&shard_address, ::rlp::decode::<Shard>)?.map(|s| s.users().to_vec()))
+    }
+
+    fn shard_metadata(&self, shard_id: ShardId) -> TrieResult<Option<ShardMetadata>> {
+        // FIXME: Handle the case that shard doesn't exist
+        let shard_root = self.shard_root(shard_id)?.unwrap_or(BLAKE_NULL_RLP);
+
+        // FIXME: Make it mutable borrow db instead of cloning.
+        let shard_level_state = ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root)?;
+        shard_level_state.metadata()
+    }
+
+    fn world(&self, shard_id: ShardId, world_id: WorldId) -> TrieResult<Option<World>> {
+        // FIXME: Handle the case that shard doesn't exist
+        let shard_root = self.shard_root(shard_id)?.unwrap_or(BLAKE_NULL_RLP);
+
+        // FIXME: Make it mutable borrow db instead of cloning.
+        let shard_level_state = ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root)?;
+        shard_level_state.world(world_id)
     }
 
     fn asset_scheme(
@@ -151,17 +192,15 @@ impl TopStateInfo for TopLevelState {
         // FIXME: Handle the case that shard doesn't exist
         let shard_root = self.shard_root(shard_id)?.unwrap_or(BLAKE_NULL_RLP);
         // FIXME: Make it mutable borrow db instead of cloning.
-        let shard_level_state =
-            ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root, self.trie_factory)?;
+        let shard_level_state = ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root)?;
         shard_level_state.asset_scheme(asset_scheme_address)
     }
 
-    fn asset(&self, shard_id: ShardId, asset_address: &AssetAddress) -> TrieResult<Option<Asset>> {
+    fn asset(&self, shard_id: ShardId, asset_address: &OwnedAssetAddress) -> TrieResult<Option<OwnedAsset>> {
         // FIXME: Handle the case that shard doesn't exist
         let shard_root = self.shard_root(shard_id)?.unwrap_or(BLAKE_NULL_RLP);
         // FIXME: Make it mutable borrow db instead of cloning.
-        let shard_level_state =
-            ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root, self.trie_factory)?;
+        let shard_level_state = ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root)?;
         shard_level_state.asset(asset_address)
     }
 
@@ -209,7 +248,7 @@ impl StateWithCheckpoint for TopLevelState {
 
 impl StateWithCache for TopLevelState {
     fn commit(&mut self) -> TrieResult<()> {
-        let mut trie = self.trie_factory.from_existing(self.db.as_hashdb_mut(), &mut self.root)?;
+        let mut trie = TrieFactory::from_existing(self.db.as_hashdb_mut(), &mut self.root)?;
         self.account.commit(&mut trie)?;
         self.regular_account.commit(&mut trie)?;
         self.metadata.commit(&mut trie)?;
@@ -250,11 +289,11 @@ impl TopLevelState {
     /// Creates new state with empty state root
     /// Used for tests.
     #[cfg(test)]
-    pub fn new(mut db: StateDB, trie_factory: TrieFactory) -> Self {
+    pub fn new(mut db: StateDB) -> Self {
         let mut root = H256::new();
 
         // init trie and reset root too null
-        let _ = trie_factory.create(db.as_hashdb_mut(), &mut root);
+        let _ = TrieFactory::create(db.as_hashdb_mut(), &mut root);
 
         TopLevelState {
             db,
@@ -265,12 +304,11 @@ impl TopLevelState {
             shard: Cache::new(),
             action_data: Cache::new(),
             id_of_checkpoints: Default::default(),
-            trie_factory,
         }
     }
 
     /// Creates new state with existing state root
-    pub fn from_existing(db: StateDB, root: H256, trie_factory: TrieFactory) -> Result<Self, TrieError> {
+    pub fn from_existing(db: StateDB, root: H256) -> Result<Self, TrieError> {
         if !db.as_hashdb().contains(&root) {
             return Err(TrieError::InvalidStateRoot(root))
         }
@@ -284,7 +322,6 @@ impl TopLevelState {
             shard: Cache::new(),
             action_data: Cache::new(),
             id_of_checkpoints: Default::default(),
-            trie_factory,
         };
 
         Ok(state)
@@ -307,19 +344,27 @@ impl TopLevelState {
         parcel: &Parcel,
         fee_payer: &Address,
         fee_payer_public: &Public,
-    ) -> StateResult<ParcelOutcome> {
+    ) -> StateResult<ParcelInvoice> {
+        // Change the address to a master address if it is a regular key.
+        let fee_payer = if self.regular_account_exists_and_not_null(fee_payer)? {
+            let regular_account = self.require_regular_account_from_address(fee_payer)?;
+            public_to_address(&regular_account.master_account())
+        } else {
+            fee_payer.clone()
+        };
+
         self.create_checkpoint(PARCEL_FEE_CHECKPOINT);
 
-        match self.apply_internal(parcel, fee_payer, fee_payer_public) {
-            Err(StateError::Transaction(_)) => unreachable!(),
+        match self.apply_internal(parcel, &fee_payer, fee_payer_public) {
+            Err(StateError::Transaction(err)) => unreachable!("{:?}", err),
             Err(err) => {
                 self.revert_to_checkpoint(PARCEL_FEE_CHECKPOINT);
                 Err(err)
             }
-            Ok(outcomes) => {
+            Ok(invoice) => {
                 self.discard_checkpoint(PARCEL_FEE_CHECKPOINT);
                 self.commit()?; // FIXME: Remove early commit.
-                Ok(outcomes)
+                Ok(invoice)
             }
         }
     }
@@ -329,7 +374,7 @@ impl TopLevelState {
         parcel: &Parcel,
         fee_payer: &Address,
         fee_payer_public: &Public,
-    ) -> StateResult<ParcelOutcome> {
+    ) -> StateResult<ParcelInvoice> {
         let nonce = self.nonce(fee_payer)?;
 
         if parcel.nonce != nonce {
@@ -356,9 +401,9 @@ impl TopLevelState {
         self.create_checkpoint(PARCEL_ACTION_CHECKPOINT);
 
         match self.apply_action(&parcel.action, &parcel.network_id, fee_payer, fee_payer_public) {
-            Ok(outcome) => {
+            Ok(invoice) => {
                 self.discard_checkpoint(PARCEL_ACTION_CHECKPOINT);
-                Ok(outcome)
+                Ok(invoice)
             }
             Err(err) => {
                 self.revert_to_checkpoint(PARCEL_ACTION_CHECKPOINT);
@@ -370,10 +415,10 @@ impl TopLevelState {
     fn apply_action(
         &mut self,
         action: &Action,
-        network_id: &u64,
+        network_id: &NetworkId,
         fee_payer: &Address,
         fee_payer_public: &Public,
-    ) -> StateResult<ParcelOutcome> {
+    ) -> StateResult<ParcelInvoice> {
         match action {
             Action::ChangeShardState {
                 transactions,
@@ -381,63 +426,62 @@ impl TopLevelState {
                 signatures: _,
             } => {
                 if changes.len() == 0 {
-                    return Ok(ParcelOutcome::Transactions(vec![]))
+                    return Ok(ParcelInvoice::Multiple(vec![]))
                 }
 
-                for t in transactions {
-                    let transaction_network_id = t.network_id();
-                    if &transaction_network_id != network_id {
-                        return Err(TransactionError::InvalidNetworkId(Mismatch {
-                            expected: *network_id,
-                            found: transaction_network_id,
-                        }).into())
-                    }
-                }
+                debug_assert!(transactions.iter().all(|t| &t.network_id() == network_id));
 
-                let first_result = self.apply_transactions_with_check(&transactions, &changes[0])?;
+                let first_result = self.apply_transactions_with_check(&transactions, &changes[0], fee_payer)?;
 
                 for change in changes.iter().skip(1) {
-                    let result = self.apply_transactions_with_check(&transactions, change)?;
+                    let result = self.apply_transactions_with_check(&transactions, change, fee_payer)?;
                     if result != first_result {
                         return Err(ParcelError::InconsistentShardOutcomes.into())
                     }
                 }
-                Ok(ParcelOutcome::Transactions(first_result))
+                Ok(ParcelInvoice::Multiple(first_result))
             }
             Action::Payment {
                 receiver,
                 amount,
             } => match self.transfer_balance(fee_payer, receiver, amount) {
-                Ok(()) => Ok(ParcelOutcome::Single {
-                    invoice: Invoice::Success,
-                    error: None,
-                }),
+                Ok(()) => Ok(ParcelInvoice::SingleSuccess),
                 Err(StateError::Parcel(
                     err @ ParcelError::InsufficientBalance {
                         ..
                     },
-                )) => Ok(ParcelOutcome::Single {
-                    invoice: Invoice::Failed,
-                    error: Some(err),
-                }),
+                )) => Ok(ParcelInvoice::SingleFail(err)),
                 Err(err) => Err(err.into()),
             },
             Action::SetRegularKey {
                 key,
             } => match self.set_regular_key(fee_payer_public, key) {
-                Ok(()) => Ok(ParcelOutcome::Single {
-                    invoice: Invoice::Success,
-                    error: None,
-                }),
+                Ok(()) => Ok(ParcelInvoice::SingleSuccess),
                 Err(error) => Err(error.into()),
             },
             Action::CreateShard => {
-                let shard_creation_cost = 1.into(); // FIXME: Make shard creation cost configurable
+                // FIXME: Make shard creation cost configurable
+                #[cfg(test)]
+                let shard_creation_cost = 1.into();
+                #[cfg(not(test))]
+                let shard_creation_cost = U256::max_value();
+
                 self.create_shard(&shard_creation_cost, fee_payer)?;
-                Ok(ParcelOutcome::Single {
-                    invoice: Invoice::Success,
-                    error: None,
-                })
+                Ok(ParcelInvoice::SingleSuccess)
+            }
+            Action::SetShardOwners {
+                shard_id,
+                owners,
+            } => {
+                self.change_shard_owners(*shard_id, owners, fee_payer)?;
+                Ok(ParcelInvoice::SingleSuccess)
+            }
+            Action::SetShardUsers {
+                shard_id,
+                users,
+            } => {
+                self.change_shard_users(*shard_id, users, fee_payer)?;
+                Ok(ParcelInvoice::SingleSuccess)
             }
             Action::Custom(bytes) => {
                 let handlers = self.db.custom_handlers().to_vec();
@@ -455,10 +499,12 @@ impl TopLevelState {
         &mut self,
         transactions: &[Transaction],
         change: &ChangeShard,
-    ) -> StateResult<Vec<TransactionOutcome>> {
+        sender: &Address,
+    ) -> StateResult<Vec<TransactionInvoice>> {
         let shard_id = change.shard_id;
 
         let shard_root = self.shard_root(shard_id)?.ok_or_else(|| ParcelError::InvalidShardId(shard_id))?;
+
         if !change.pre_root.is_zero() && shard_root != change.pre_root {
             return Err(ParcelError::InvalidShardRoot(Mismatch {
                 expected: shard_root,
@@ -466,7 +512,8 @@ impl TopLevelState {
             }).into())
         }
 
-        let (new_shard_root, db, results) = self.apply_transactions_internal(transactions, shard_id, shard_root)?;
+        let (new_shard_root, db, results) =
+            self.apply_transactions_internal(transactions, shard_id, shard_root, sender)?;
         if !change.post_root.is_zero() && change.post_root != new_shard_root {
             return Err(ParcelError::InvalidShardRoot(Mismatch {
                 expected: new_shard_root,
@@ -480,9 +527,14 @@ impl TopLevelState {
         Ok(results)
     }
 
-    pub fn apply_transactions(&self, transactions: &[Transaction], shard_id: ShardId) -> StateResult<ChangeShard> {
+    pub fn apply_transactions(
+        &self,
+        transactions: &[Transaction],
+        shard_id: ShardId,
+        sender: &Address,
+    ) -> StateResult<ChangeShard> {
         let pre_root = self.shard_root(shard_id)?.ok_or_else(|| ParcelError::InvalidShardId(shard_id))?;
-        let (post_root, ..) = self.apply_transactions_internal(transactions, shard_id, pre_root)?;
+        let (post_root, ..) = self.apply_transactions_internal(transactions, shard_id, pre_root, sender)?;
         Ok(ChangeShard {
             shard_id,
             pre_root,
@@ -495,14 +547,18 @@ impl TopLevelState {
         transactions: &[Transaction],
         shard_id: ShardId,
         shard_root: H256,
-    ) -> StateResult<(H256, StateDB, Vec<TransactionOutcome>)> {
+        sender: &Address,
+    ) -> StateResult<(H256, StateDB, Vec<TransactionInvoice>)> {
+        let mut shard_owners = self.shard_owners(shard_id)?.expect("Shard must have the owner");
+        let mut shard_users = self.shard_users(shard_id)?.expect("Shard must exist");
+        shard_users.append(&mut shard_owners);
+
         // FIXME: Make it mutable borrow db instead of cloning.
-        let mut shard_level_state =
-            ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root, self.trie_factory)?;
+        let mut shard_level_state = ShardLevelState::from_existing(shard_id, self.db.clone(), shard_root)?;
 
         let mut results = Vec::with_capacity(transactions.len());
         for t in transactions {
-            let result = shard_level_state.apply(t)?;
+            let result = shard_level_state.apply(shard_id, t, sender, &shard_users)?;
             results.push(result);
         }
 
@@ -510,12 +566,12 @@ impl TopLevelState {
         Ok((new_root, db, results))
     }
 
-    fn create_shard_level_state(&mut self) -> StateResult<()> {
+    fn create_shard_level_state(&mut self, owners: Vec<Address>, users: Vec<Address>) -> StateResult<()> {
         let (shard_id, shard_root, db) = {
             let mut metadata = self.require_metadata()?;
             let shard_id = metadata.increase_number_of_shards();
 
-            let mut shard_level_state = ShardLevelState::try_new(shard_id, self.db.clone(), self.trie_factory)?;
+            let mut shard_level_state = ShardLevelState::try_new(shard_id, self.db.clone())?;
 
             let (shard_root, db) = shard_level_state.drop();
 
@@ -526,9 +582,11 @@ impl TopLevelState {
             self.db = db;
         }
 
-        ctrace!(STATE, "shard created({}, {:?})", shard_id, shard_root);
+        ctrace!(STATE, "shard created({}, {:?})\nowners: {:?}, users: {:?}", shard_id, shard_root, owners, users);
 
         self.set_shard_root(shard_id, &BLAKE_NULL_RLP, &shard_root)?;
+        self.set_shard_owners(shard_id, owners)?;
+        self.set_shard_users(shard_id, users)?;
         Ok(())
     }
 
@@ -553,23 +611,16 @@ impl TopLevelState {
     fn ensure_master_account_cached<F, U>(&self, a: &Address, f: F) -> TrieResult<U>
     where
         F: Fn(Option<&Account>) -> U, {
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let from_global_cache = |a| self.db.get_cached_account_with(a, |acc| f(acc.map(|a| &*a)));
         self.account.ensure_cached(&a, &f, db, from_global_cache)
     }
 
     fn require_account<'a>(&'a self, a: &Address) -> TrieResult<RefMut<'a, Account>> {
-        // Change the address to a master address if a regular key exists.
-
-        let a = if self.regular_account_exists_and_not_null(a)? {
-            let regular_account = self.require_regular_account_from_address(a)?;
-            public_to_address(&regular_account.master_account())
-        } else {
-            a.clone()
-        };
+        debug_assert_eq!(Ok(false), self.regular_account_exists_and_not_null(a));
 
         let default = || Account::new(0u8.into(), 0.into());
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let from_db = || self.db.get_cached_account(&a);
         self.account.require_item_or_from(&a, default, db, from_db)
     }
@@ -581,7 +632,7 @@ impl TopLevelState {
     where
         F: Fn(Option<&RegularAccount>) -> U, {
         let a = RegularAccountAddress::from_address(a);
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let from_global_cache = |a| self.db.get_cached_regular_account_with(a, |acc| f(acc.map(|a| &*a)));
         self.regular_account.ensure_cached(&a, &f, db, from_global_cache)
     }
@@ -589,7 +640,7 @@ impl TopLevelState {
     fn require_regular_account<'a>(&'a self, public: &Public) -> TrieResult<RefMut<'a, RegularAccount>> {
         let regular_account_address = RegularAccountAddress::new(public);
         let default = || RegularAccount::new(Public::default());
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let from_db = || self.db.get_cached_regular_account(&regular_account_address);
         self.regular_account.require_item_or_from(&regular_account_address, default, db, from_db)
     }
@@ -597,22 +648,22 @@ impl TopLevelState {
     fn require_regular_account_from_address<'a>(&'a self, a: &Address) -> TrieResult<RefMut<'a, RegularAccount>> {
         let regular_account_address = RegularAccountAddress::from_address(a);
         let default = || RegularAccount::new(Public::default());
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let from_db = || self.db.get_cached_regular_account(&regular_account_address);
         self.regular_account.require_item_or_from(&regular_account_address, default, db, from_db)
     }
 
     fn require_metadata<'a>(&'a self) -> TrieResult<RefMut<'a, Metadata>> {
         let default = || Metadata::new(0);
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let address = MetadataAddress::new();
         let from_db = || self.db.get_cached_metadata(&address);
         self.metadata.require_item_or_from(&address, default, db, from_db)
     }
 
     fn require_shard<'a>(&'a self, shard_id: ShardId) -> TrieResult<RefMut<'a, Shard>> {
-        let default = || Shard::new(BLAKE_NULL_RLP);
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let default = || Shard::new(BLAKE_NULL_RLP, vec![], vec![]);
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let shard_address = ShardAddress::new(shard_id);
         let from_db = || self.db.get_cached_shard(&shard_address);
         self.shard.require_item_or_from(&shard_address, default, db, from_db)
@@ -620,7 +671,7 @@ impl TopLevelState {
 
     fn require_action_data<'a>(&'a self, key: &H256) -> TrieResult<RefMut<'a, Bytes>> {
         let default = || NULL_RLP.to_vec();
-        let db = self.trie_factory.readonly(self.db.as_hashdb(), &self.root)?;
+        let db = TrieFactory::readonly(self.db.as_hashdb(), &self.root)?;
         let from_db = || self.db.get_cached_action_data(key);
         self.action_data.require_item_or_from(key, default, db, from_db)
     }
@@ -650,7 +701,6 @@ impl Clone for TopLevelState {
             metadata: self.metadata.clone(),
             shard: self.shard.clone(),
             action_data: self.action_data.clone(),
-            trie_factory: self.trie_factory.clone(),
         }
     }
 }
@@ -769,9 +819,30 @@ impl TopState<StateDB> for TopLevelState {
         }
         self.sub_balance(fee_payer, shard_creation_cost)?;
 
-        self.create_shard_level_state()?;
+        self.create_shard_level_state(vec![*fee_payer], vec![])?;
 
         Ok(())
+    }
+
+    fn change_shard_owners(&mut self, shard_id: ShardId, owners: &[Address], sender: &Address) -> StateResult<()> {
+        let old_owners = self.shard_owners(shard_id)?.ok_or_else(|| ParcelError::InvalidShardId(shard_id))?;
+        if !old_owners.contains(sender) {
+            return Err(ParcelError::InsufficientPermission.into())
+        }
+        if !owners.contains(sender) {
+            return Err(ParcelError::NewOwnersMustContainSender.into())
+        }
+
+        self.set_shard_owners(shard_id, owners.to_vec())
+    }
+
+    fn change_shard_users(&mut self, shard_id: ShardId, users: &[Address], sender: &Address) -> StateResult<()> {
+        let owners = self.shard_owners(shard_id)?.ok_or_else(|| ParcelError::InvalidShardId(shard_id))?;
+        if !owners.contains(sender) {
+            return Err(ParcelError::InsufficientPermission.into())
+        }
+
+        self.set_shard_users(shard_id, users.to_vec())
     }
 
     fn set_shard_root(&mut self, shard_id: ShardId, old_root: &H256, new_root: &H256) -> StateResult<()> {
@@ -781,6 +852,17 @@ impl TopState<StateDB> for TopLevelState {
         Ok(())
     }
 
+    fn set_shard_owners(&mut self, shard_id: ShardId, new_owners: Vec<Address>) -> StateResult<()> {
+        let mut shard = self.require_shard(shard_id)?;
+        shard.set_owners(new_owners);
+        Ok(())
+    }
+
+    fn set_shard_users(&mut self, shard_id: ShardId, new_users: Vec<Address>) -> StateResult<()> {
+        let mut shard = self.require_shard(shard_id)?;
+        shard.set_users(new_users);
+        Ok(())
+    }
     fn update_action_data(&mut self, key: &H256, data: Bytes) -> StateResult<()> {
         let mut action_data = self.require_action_data(key)?;
         *action_data = data;
@@ -798,19 +880,19 @@ mod tests_state {
     use super::*;
 
     #[test]
-    fn should_work_when_cloned() {
-        let a = Address::zero();
+    fn work_when_cloned() {
+        let a = Address::default();
 
         let mut state = {
             let mut state = get_temp_state();
-            assert_eq!(state.account_exists(&a).unwrap(), false);
-            state.inc_nonce(&a).unwrap();
-            state.commit().unwrap();
+            assert_eq!(Ok(false), state.account_exists(&a));
+            assert_eq!(Ok(()), state.inc_nonce(&a));
+            assert_eq!(Ok(()), state.commit());
             state.clone()
         };
 
-        state.inc_nonce(&a).unwrap();
-        state.commit().unwrap();
+        assert_eq!(Ok(()), state.inc_nonce(&a));
+        assert_eq!(Ok(()), state.commit());
     }
 
 
@@ -820,197 +902,197 @@ mod tests_state {
 
         let original_state = get_temp_state();
 
-        assert_eq!(original_state.account_exists(&a).unwrap(), false);
+        assert_eq!(Ok(false), original_state.account_exists(&a));
 
         let mut cloned_state = original_state.clone();
 
-        cloned_state.inc_nonce(&a).unwrap();
-        cloned_state.commit().unwrap();
+        assert_eq!(Ok(()), cloned_state.inc_nonce(&a));
+        assert_eq!(Ok(()), cloned_state.commit());
 
         assert_ne!(original_state.nonce(&a), cloned_state.nonce(&a));
     }
 
     #[test]
     fn get_from_database() {
-        let a = Address::zero();
+        let a = Address::default();
         let (root, db) = {
             let mut state = get_temp_state();
-            state.inc_nonce(&a).unwrap();
-            state.add_balance(&a, &U256::from(69u64)).unwrap();
-            state.commit().unwrap();
-            assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
+            assert_eq!(Ok(()), state.inc_nonce(&a));
+            assert_eq!(Ok(()), state.add_balance(&a, &U256::from(69u64)));
+            assert_eq!(Ok(()), state.commit());
+            assert_eq!(Ok(69.into()), state.balance(&a));
             state.drop()
         };
 
-        let state = TopLevelState::from_existing(db, root, Default::default()).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
+        let state = TopLevelState::from_existing(db, root).unwrap();
+        assert_eq!(Ok(69.into()), state.balance(&a));
+        assert_eq!(Ok(1.into()), state.nonce(&a));
     }
 
     #[test]
     fn remove() {
-        let a = Address::zero();
+        let a = Address::default();
         let mut state = get_temp_state();
-        assert_eq!(state.account_exists(&a).unwrap(), false);
-        assert_eq!(state.account_exists_and_not_null(&a).unwrap(), false);
-        state.inc_nonce(&a).unwrap();
-        assert_eq!(state.account_exists(&a).unwrap(), true);
-        assert_eq!(state.account_exists_and_not_null(&a).unwrap(), true);
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
+        assert_eq!(Ok(false), state.account_exists(&a));
+        assert_eq!(Ok(false), state.account_exists_and_not_null(&a));
+        assert_eq!(Ok(()), state.inc_nonce(&a));
+        assert_eq!(Ok(true), state.account_exists(&a));
+        assert_eq!(Ok(true), state.account_exists_and_not_null(&a));
+        assert_eq!(Ok(1.into()), state.nonce(&a));
         state.kill_account(&a);
-        assert_eq!(state.account_exists(&a).unwrap(), false);
-        assert_eq!(state.account_exists_and_not_null(&a).unwrap(), false);
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
+        assert_eq!(Ok(false), state.account_exists(&a));
+        assert_eq!(Ok(false), state.account_exists_and_not_null(&a));
+        assert_eq!(Ok(0.into()), state.nonce(&a));
     }
 
     #[test]
     fn empty_account_is_not_created() {
-        let a = Address::zero();
+        let a = Address::default();
         let db = get_temp_state_db();
         let (root, db) = {
-            let mut state = TopLevelState::new(db, Default::default());
-            state.add_balance(&a, &U256::default()).unwrap(); // create an empty account
-            state.commit().unwrap();
+            let mut state = TopLevelState::new(db);
+            assert_eq!(Ok(()), state.add_balance(&a, &U256::default())); // create an empty account
+            assert_eq!(Ok(()), state.commit());
             state.drop()
         };
-        let state = TopLevelState::from_existing(db, root, Default::default()).unwrap();
-        assert!(!state.account_exists(&a).unwrap());
-        assert!(!state.account_exists_and_not_null(&a).unwrap());
+        let state = TopLevelState::from_existing(db, root).unwrap();
+        assert_eq!(Ok(false), state.account_exists(&a));
+        assert_eq!(Ok(false), state.account_exists_and_not_null(&a));
     }
 
     #[test]
     fn remove_from_database() {
-        let a = Address::zero();
+        let a = Address::default();
         let (root, db) = {
             let mut state = get_temp_state();
-            state.inc_nonce(&a).unwrap();
-            state.commit().unwrap();
-            assert_eq!(state.account_exists(&a).unwrap(), true);
-            assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
+            assert_eq!(Ok(()), state.inc_nonce(&a));
+            assert_eq!(Ok(()), state.commit());
+            assert_eq!(Ok(true), state.account_exists(&a));
+            assert_eq!(Ok(1.into()), state.nonce(&a));
             state.drop()
         };
 
         let (root, db) = {
-            let mut state = TopLevelState::from_existing(db, root, Default::default()).unwrap();
-            assert_eq!(state.account_exists(&a).unwrap(), true);
-            assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
+            let mut state = TopLevelState::from_existing(db, root).unwrap();
+            assert_eq!(Ok(true), state.account_exists(&a));
+            assert_eq!(Ok(1.into()), state.nonce(&a));
             state.kill_account(&a);
-            state.commit().unwrap();
-            assert_eq!(state.account_exists(&a).unwrap(), false);
-            assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
+            assert_eq!(Ok(()), state.commit());
+            assert_eq!(Ok(false), state.account_exists(&a));
+            assert_eq!(Ok(0.into()), state.nonce(&a));
             state.drop()
         };
 
-        let state = TopLevelState::from_existing(db, root, Default::default()).unwrap();
-        assert_eq!(state.account_exists(&a).unwrap(), false);
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
+        let state = TopLevelState::from_existing(db, root).unwrap();
+        assert_eq!(Ok(false), state.account_exists(&a));
+        assert_eq!(Ok(0.into()), state.nonce(&a));
     }
 
     #[test]
     fn alter_balance() {
         let mut state = get_temp_state();
-        let a = Address::zero();
+        let a = Address::default();
         let b = 1u64.into();
-        state.add_balance(&a, &U256::from(69u64)).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
-        state.commit().unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
-        state.sub_balance(&a, &U256::from(42u64)).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(27u64));
-        state.commit().unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(27u64));
-        state.transfer_balance(&a, &b, &U256::from(18u64)).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(9u64));
-        assert_eq!(state.balance(&b).unwrap(), U256::from(18u64));
-        state.commit().unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(9u64));
-        assert_eq!(state.balance(&b).unwrap(), U256::from(18u64));
+        assert_eq!(Ok(()), state.add_balance(&a, &U256::from(69u64)));
+        assert_eq!(Ok(69.into()), state.balance(&a));
+        assert_eq!(Ok(()), state.commit());
+        assert_eq!(Ok(69.into()), state.balance(&a));
+        assert_eq!(Ok(()), state.sub_balance(&a, &U256::from(42u64)));
+        assert_eq!(Ok(27.into()), state.balance(&a));
+        assert_eq!(Ok(()), state.commit());
+        assert_eq!(Ok(27.into()), state.balance(&a));
+        assert_eq!(Ok(()), state.transfer_balance(&a, &b, &U256::from(18u64)));
+        assert_eq!(Ok(9.into()), state.balance(&a));
+        assert_eq!(Ok(18.into()), state.balance(&b));
+        assert_eq!(Ok(()), state.commit());
+        assert_eq!(Ok(9.into()), state.balance(&a));
+        assert_eq!(Ok(18.into()), state.balance(&b));
     }
 
     #[test]
     fn alter_nonce() {
         let mut state = get_temp_state();
-        let a = Address::zero();
-        state.inc_nonce(&a).unwrap();
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
-        state.inc_nonce(&a).unwrap();
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(2u64));
-        state.commit().unwrap();
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(2u64));
-        state.inc_nonce(&a).unwrap();
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(3u64));
-        state.commit().unwrap();
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(3u64));
+        let a = Address::default();
+        assert_eq!(Ok(()), state.inc_nonce(&a));
+        assert_eq!(Ok(1.into()), state.nonce(&a));
+        assert_eq!(Ok(()), state.inc_nonce(&a));
+        assert_eq!(Ok(2.into()), state.nonce(&a));
+        assert_eq!(Ok(()), state.commit());
+        assert_eq!(Ok(2.into()), state.nonce(&a));
+        assert_eq!(Ok(()), state.inc_nonce(&a));
+        assert_eq!(Ok(3.into()), state.nonce(&a));
+        assert_eq!(Ok(()), state.commit());
+        assert_eq!(Ok(3.into()), state.nonce(&a));
     }
 
     #[test]
     fn balance_nonce() {
         let mut state = get_temp_state();
-        let a = Address::zero();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(0u64));
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
-        state.commit().unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(0u64));
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
+        let a = Address::default();
+        assert_eq!(Ok(0.into()), state.balance(&a));
+        assert_eq!(Ok(0.into()), state.nonce(&a));
+        assert_eq!(Ok(()), state.commit());
+        assert_eq!(Ok(0.into()), state.balance(&a));
+        assert_eq!(Ok(0.into()), state.nonce(&a));
     }
 
     #[test]
     fn ensure_cached() {
         let mut state = get_temp_state();
-        let a = Address::zero();
+        let a = Address::default();
         state.require_account(&a).unwrap();
-        state.commit().unwrap();
+        assert_eq!(Ok(()), state.commit());
         assert_eq!(*state.root(), "db4046bb91a12a37cbfb0f09631aad96a97248423163eca791e19b430cc7fe4a".into());
     }
 
     #[test]
     fn checkpoint_basic() {
         let mut state = get_temp_state();
-        let a = Address::zero();
+        let a = Address::default();
         state.create_checkpoint(0);
-        state.add_balance(&a, &U256::from(69u64)).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
+        assert_eq!(Ok(()), state.add_balance(&a, &U256::from(69u64)));
+        assert_eq!(Ok(69.into()), state.balance(&a));
         state.discard_checkpoint(0);
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
+        assert_eq!(Ok(69.into()), state.balance(&a));
         state.create_checkpoint(1);
-        state.add_balance(&a, &U256::from(1u64)).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(70u64));
+        assert_eq!(Ok(()), state.add_balance(&a, &U256::from(1u64)));
+        assert_eq!(Ok(70.into()), state.balance(&a));
         state.revert_to_checkpoint(1);
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
+        assert_eq!(Ok(69.into()), state.balance(&a));
     }
 
     #[test]
     fn checkpoint_nested() {
         let mut state = get_temp_state();
-        let a = Address::zero();
+        let a = Address::default();
         state.create_checkpoint(0);
-        state.add_balance(&a, &U256::from(69u64)).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&a, &U256::from(69u64)));
         state.create_checkpoint(1);
-        state.add_balance(&a, &U256::from(69u64)).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64 + 69u64));
+        assert_eq!(Ok(()), state.add_balance(&a, &U256::from(69u64)));
+        assert_eq!(Ok((69 + 69).into()), state.balance(&a));
         state.revert_to_checkpoint(1);
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64));
+        assert_eq!(Ok(69.into()), state.balance(&a));
         state.revert_to_checkpoint(0);
-        assert_eq!(state.balance(&a).unwrap(), U256::from(0));
+        assert_eq!(Ok(0.into()), state.balance(&a));
     }
 
     #[test]
     fn checkpoint_discard() {
         let mut state = get_temp_state();
-        let a = Address::zero();
+        let a = Address::default();
         state.create_checkpoint(0);
-        state.add_balance(&a, &U256::from(69u64)).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&a, &U256::from(69u64)));
         state.create_checkpoint(1);
-        state.add_balance(&a, &U256::from(69u64)).unwrap();
-        state.inc_nonce(&a).unwrap();
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64 + 69u64));
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
+        assert_eq!(Ok(()), state.add_balance(&a, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.inc_nonce(&a));
+        assert_eq!(Ok((69 + 69).into()), state.balance(&a));
+        assert_eq!(Ok(1.into()), state.nonce(&a));
         state.discard_checkpoint(1);
-        assert_eq!(state.balance(&a).unwrap(), U256::from(69u64 + 69u64));
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(1u64));
+        assert_eq!(Ok((69 + 69).into()), state.balance(&a));
+        assert_eq!(Ok(1.into()), state.nonce(&a));
         state.revert_to_checkpoint(0);
-        assert_eq!(state.balance(&a).unwrap(), U256::from(0u64));
-        assert_eq!(state.nonce(&a).unwrap(), U256::from(0u64));
+        assert_eq!(Ok(0.into()), state.balance(&a));
+        assert_eq!(Ok(0.into()), state.nonce(&a));
     }
 
     #[test]
@@ -1038,41 +1120,146 @@ mod tests_parcel {
 
     #[test]
     fn apply_empty_parcel() {
+        let (sender, sender_public) = address();
+
         let mut state = get_temp_state();
-        state.create_shard_level_state().unwrap();
-        state.commit().unwrap();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.commit());
 
         let parcel = Parcel {
             fee: 5.into(),
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
             action: Action::ChangeShardState {
                 transactions: vec![],
                 changes: vec![],
                 signatures: vec![],
             },
         };
-        let (sender, sender_public) = address();
-        state.add_balance(&sender, &20.into()).unwrap();
 
-        match state.apply(&parcel, &sender, &sender_public).unwrap() {
-            ParcelOutcome::Transactions(res) => {
-                assert!(res.is_empty());
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+
+        let result = state.apply(&parcel, &sender, &sender_public);
+
+        assert_eq!(Ok(ParcelInvoice::Multiple(vec![])), result);
         assert_eq!(Ok(15.into()), state.balance(&sender));
         assert_eq!(Ok(1.into()), state.nonce(&sender));
     }
 
     #[test]
-    fn should_apply_error_for_invalid_nonce() {
+    fn create_world_without_owners() {
+        let (sender, sender_public) = address();
+
+        let network_id = "tc".into();
+        let shard_id = 0;
+
+        let mut state = get_temp_state();
+        let users = vec![];
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], users.clone()));
+        assert_eq!(Ok(()), state.commit());
+
+        let nonce = 0;
+        let owners = vec![];
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+
+        let transaction = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce,
+            owners: owners.clone(),
+        };
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            nonce: 0.into(),
+            network_id,
+            action: Action::ChangeShardState {
+                transactions: vec![transaction],
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::zero(),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+        };
+
+        let result = state.apply(&parcel, &sender, &sender_public);
+
+        assert_eq!(Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success])), result);
+        assert_eq!(Ok(15.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+
+        let metadata = state.shard_metadata(shard_id);
+        assert_eq!(Ok(Some(ShardMetadata::new_with_nonce(1, 1))), metadata);
+
+        let world_id = 0;
+        let world = state.world(shard_id, world_id);
+        assert_eq!(Ok(Some(World::new(owners, users))), world);
+    }
+
+    #[test]
+    fn create_world_with_owners() {
+        let (sender, sender_public) = address();
+
+        let network_id = "tc".into();
+        let shard_id = 0;
+
+        let mut state = get_temp_state();
+        let users = vec![];
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], users.clone()));
+        assert_eq!(Ok(()), state.commit());
+
+        let nonce = 0;
+        let owners = vec![Address::random(), Address::random()];
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+
+        let transaction = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce,
+            owners: owners.clone(),
+        };
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            nonce: 0.into(),
+            network_id,
+            action: Action::ChangeShardState {
+                transactions: vec![transaction],
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::zero(),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+        };
+
+        let result = state.apply(&parcel, &sender, &sender_public);
+
+        assert_eq!(Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success])), result);
+        assert_eq!(Ok(15.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+
+        let metadata = state.shard_metadata(shard_id);
+        assert_eq!(Ok(Some(ShardMetadata::new_with_nonce(1, 1))), metadata);
+
+        let world_id = 0;
+        let world = state.world(shard_id, world_id);
+        assert_eq!(Ok(Some(World::new(owners, users))), world);
+    }
+
+    #[test]
+    fn apply_error_for_invalid_nonce() {
         let mut state = get_temp_state();
 
         let parcel = Parcel {
             nonce: 2.into(),
             fee: 5.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
             action: Action::ChangeShardState {
                 transactions: vec![],
                 changes: vec![],
@@ -1080,32 +1267,28 @@ mod tests_parcel {
             },
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &20.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
 
-        match state.apply(&parcel, &sender, &sender_public) {
-            Err(StateError::Parcel(err)) => {
-                assert_eq!(
-                    ParcelError::InvalidNonce {
-                        expected: 0.into(),
-                        got: 2.into()
-                    },
-                    err
-                );
-            }
-            other => panic!("{:?}", other),
-        }
+        let result = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(
+            Err(StateError::Parcel(ParcelError::InvalidNonce {
+                expected: 0.into(),
+                got: 2.into()
+            })),
+            result
+        );
 
         assert_eq!(Ok(20.into()), state.balance(&sender));
         assert_eq!(Ok(0.into()), state.nonce(&sender));
     }
 
     #[test]
-    fn should_apply_error_for_not_enough_cash() {
+    fn apply_error_for_not_enough_cash() {
         let mut state = get_temp_state();
         let parcel = Parcel {
             fee: 5.into(),
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
             action: Action::ChangeShardState {
                 transactions: vec![],
                 changes: vec![],
@@ -1113,27 +1296,23 @@ mod tests_parcel {
             },
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &4.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &4.into()));
 
-        match state.apply(&parcel, &sender, &sender_public) {
-            Err(StateError::Parcel(err)) => {
-                assert_eq!(
-                    ParcelError::InsufficientBalance {
-                        address: sender,
-                        balance: 4.into(),
-                        cost: 5.into(),
-                    },
-                    err
-                );
-            }
-            other => panic!("{:?}", other),
-        }
+        let result = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(
+            Err(StateError::Parcel(ParcelError::InsufficientBalance {
+                address: sender,
+                balance: 4.into(),
+                cost: 5.into(),
+            })),
+            result
+        );
         assert_eq!(Ok(4.into()), state.balance(&sender));
         assert_eq!(Ok(0.into()), state.nonce(&sender));
     }
 
     #[test]
-    fn should_apply_payment() {
+    fn apply_payment() {
         let mut state = get_temp_state();
         let receiver = 1u64.into();
 
@@ -1144,18 +1323,12 @@ mod tests_parcel {
                 amount: 10.into(),
             },
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &20.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
 
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None,
-            },
-            state.apply(&parcel, &sender, &sender_public).unwrap()
-        );
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &sender, &sender_public));
 
         assert_eq!(Ok(10.into()), state.balance(&receiver));
         assert_eq!(Ok(5.into()), state.balance(&sender));
@@ -1163,7 +1336,7 @@ mod tests_parcel {
     }
 
     #[test]
-    fn should_apply_set_regular_key() {
+    fn apply_set_regular_key() {
         let mut state = get_temp_state();
         let key = 1u64.into();
 
@@ -1173,24 +1346,18 @@ mod tests_parcel {
                 key,
             },
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &5.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &5.into()));
 
         assert_eq!(state.regular_key(&sender), Ok(None));
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None
-            },
-            state.apply(&parcel, &sender, &sender_public).unwrap()
-        );
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &sender, &sender_public));
         assert_eq!(Ok(Some(key)), state.regular_key(&sender));
     }
 
     #[test]
-    fn should_use_master_balance_when_signed_with_regular_key() {
+    fn use_master_balance_when_signed_with_regular_key() {
         let mut state = get_temp_state();
         let regular_keypair = Random.generate().unwrap();
         let key = regular_keypair.public();
@@ -1201,40 +1368,32 @@ mod tests_parcel {
                 key: key.clone(),
             },
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &15.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &15.into()));
 
         assert_eq!(state.regular_key(&sender), Ok(None));
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None
-            },
-            state.apply(&parcel, &sender, &sender_public).unwrap()
-        );
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &sender, &sender_public));
         assert_eq!(Ok(Some(*key)), state.regular_key(&sender));
 
         let parcel = Parcel {
             action: Action::CreateShard,
             fee: 5.into(),
             nonce: 1.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
 
         assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None
-            },
-            state.apply(&parcel, &regular_keypair.address(), regular_keypair.public()).unwrap()
+            Ok(ParcelInvoice::SingleSuccess),
+            state.apply(&parcel, &regular_keypair.address(), regular_keypair.public())
         );
         assert_eq!(Ok(4.into()), state.balance(&sender));
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(0));
     }
 
     #[test]
-    fn should_fail_when_two_accounts_used_the_same_regular_key() {
+    fn fail_when_two_accounts_used_the_same_regular_key() {
         let mut state = get_temp_state();
         let regular_keypair = Random.generate().unwrap();
         let key = regular_keypair.public();
@@ -1245,19 +1404,13 @@ mod tests_parcel {
                 key: key.clone(),
             },
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &15.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &15.into()));
 
         assert_eq!(state.regular_key(&sender), Ok(None));
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None
-            },
-            state.apply(&parcel, &sender, &sender_public).unwrap()
-        );
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &sender, &sender_public));
         assert_eq!(Ok(Some(*key)), state.regular_key(&sender));
 
         let parcel = Parcel {
@@ -1266,27 +1419,25 @@ mod tests_parcel {
                 key: key.clone(),
             },
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender2, sender_public2) = address();
-        state.add_balance(&sender2, &15.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender2, &15.into()));
 
-        match state.apply(&parcel, &sender2, &sender_public2) {
-            Err(StateError::Parcel(err)) => assert_eq!(ParcelError::RegularKeyAlreadyInUse, err),
-            other => panic!("{:?}", other),
-        }
+        let result = state.apply(&parcel, &sender2, &sender_public2);
+        assert_eq!(Err(StateError::Parcel(ParcelError::RegularKeyAlreadyInUse)), result);
         assert_eq!(Ok(None), state.regular_key(&sender2));
     }
 
     #[test]
-    fn should_fail_when_regular_key_is_already_registered_as_master_key() {
+    fn fail_when_regular_key_is_already_registered_as_master_key() {
         let (sender, sender_public) = address();
         let (sender2, sender_public2) = address();
 
         let mut state = get_temp_state();
 
-        state.add_balance(&sender, &20.into()).unwrap();
-        state.add_balance(&sender2, &20.into()).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        assert_eq!(Ok(()), state.add_balance(&sender2, &20.into()));
 
         let parcel = Parcel {
             fee: 5.into(),
@@ -1294,25 +1445,23 @@ mod tests_parcel {
                 key: sender_public2.clone(),
             },
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
 
-        match state.apply(&parcel, &sender, &sender_public) {
-            Err(StateError::Parcel(err)) => assert_eq!(ParcelError::RegularKeyAlreadyInUseAsMaster, err),
-            other => panic!("{:?}", other),
-        }
+        let result = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(Err(StateError::Parcel(ParcelError::RegularKeyAlreadyInUseAsMaster)), result);
     }
 
     #[test]
-    fn should_be_able_to_change_regular_key() {
+    fn change_regular_key() {
         let (sender, sender_public) = address();
         let (regular_address, regular_public) = address();
         let (_, regular_public2) = address();
 
         let mut state = get_temp_state();
 
-        state.add_balance(&sender, &20.into()).unwrap();
-        state.set_regular_key(&sender_public, &regular_public).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        assert_eq!(Ok(()), state.set_regular_key(&sender_public, &regular_public));
 
         let parcel = Parcel {
             fee: 5.into(),
@@ -1320,260 +1469,43 @@ mod tests_parcel {
                 key: regular_public2,
             },
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
 
         assert_eq!(Some(regular_public), state.regular_key(&sender).unwrap());
         assert_eq!(Ok(true), state.regular_account_exists_and_not_null(&regular_address));
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None
-            },
-            state.apply(&parcel, &regular_address, &regular_public).unwrap()
-        );
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &regular_address, &regular_public));
         assert_eq!(Ok(false), state.regular_account_exists_and_not_null(&regular_address));
         assert_eq!(Some(regular_public2), state.regular_key(&sender).unwrap());
     }
 
     #[test]
-    fn should_be_able_to_use_deleted_regular_key_as_master_key() {
-        let (sender, sender_public) = address();
-        let (regular_address, regular_public) = address();
-        let (_, regular_public2) = address();
-
-        let mut state = get_temp_state();
-
-        state.add_balance(&sender, &20.into()).unwrap();
-        state.set_regular_key(&sender_public, &regular_public).unwrap();
-        state.set_regular_key(&sender_public, &regular_public2).unwrap();
-
-        assert_eq!(Ok(false), state.regular_account_exists_and_not_null(&regular_address));
-        state.add_balance(&regular_address, &20.into()).unwrap();
-
-        let parcel = Parcel {
-            action: Action::CreateShard,
-            fee: 5.into(),
-            nonce: 0.into(),
-            network_id: 0xCA,
-        };
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None
-            },
-            state.apply(&parcel, &regular_address, &regular_public).unwrap()
-        );
-        assert_eq!(Ok(14.into()), state.balance(&regular_address));
-        assert_eq!(Ok(20.into()), state.balance(&sender));
-    }
-
-    #[test]
-    fn should_fail_when_someone_sends_some_ccc_to_an_address_which_used_as_a_regular_key() {
+    fn pass_registrar_check_using_a_regular_key() {
         let (sender, sender_public) = address();
         let (regular_address, regular_public) = address();
 
-        let mut state = get_temp_state();
-
-        state.add_balance(&sender, &20.into()).unwrap();
-        state.set_regular_key(&sender_public, &regular_public).unwrap();
-
-        let parcel = Parcel {
-            action: Action::Payment {
-                receiver: regular_address,
-                amount: 5.into(),
-            },
-            fee: 5.into(),
-            nonce: 0.into(),
-            network_id: 0xCA,
-        };
-        match state.apply(&parcel, &sender, &sender_public) {
-            Err(StateError::Parcel(err)) => assert_eq!(ParcelError::InvalidTransferDestination, err),
-            other => panic!("{:?}", other),
-        }
-        assert_eq!(Ok(20.into()), state.balance(&sender));
-    }
-
-    #[test]
-    fn should_apply_error_for_action_failure() {
-        let mut state = get_temp_state();
-        let receiver = 1u64.into();
-
-        let parcel = Parcel {
-            fee: 5.into(),
-            action: Action::Payment {
-                receiver,
-                amount: 30.into(),
-            },
-            nonce: 0.into(),
-            network_id: 0xCA,
-        };
-        let (sender, sender_public) = address();
-        state.add_balance(&sender, &20.into()).unwrap();
-
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Failed,
-                error: Some(ParcelError::InsufficientBalance {
-                    address: sender,
-                    balance: 15.into(),
-                    cost: 30.into(),
-                })
-            },
-            state.apply(&parcel, &sender, &sender_public).unwrap()
-        );
-
-        assert_eq!(Ok(0.into()), state.balance(&receiver));
-        assert_eq!(Ok(15.into()), state.balance(&sender));
-        assert_eq!(Ok(1.into()), state.nonce(&sender));
-    }
-
-    #[test]
-    fn mint_permissioned_asset() {
-        let mut state = get_temp_state();
-        state.create_shard_level_state().unwrap();
-        state.commit().unwrap();
-
+        let network_id = "tc".into();
+        let world_id = 0;
         let shard_id = 0x0;
-
-        let metadata = "metadata".to_string();
-        let lock_script_hash = H256::random();
-        let parameters = vec![];
-        let registrar = Some(Address::random());
-        let amount = 30;
-        let transaction = Transaction::AssetMint {
-            network_id: 0xCA,
-            shard_id,
-            metadata: metadata.clone(),
-            output: AssetMintOutput {
-                lock_script_hash,
-                parameters: parameters.clone(),
-                amount: Some(amount),
-            },
-            registrar,
-            nonce: 0,
-        };
-        let transaction_hash = transaction.hash();
-        let transactions = vec![transaction];
-        let parcel = Parcel {
-            fee: 11.into(),
-            action: Action::ChangeShardState {
-                transactions,
-                changes: vec![ChangeShard {
-                    shard_id,
-                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
-                    post_root: H256::zero(),
-                }],
-                signatures: vec![],
-            },
-            nonce: 0.into(),
-            network_id: 0xCA,
-        };
-        let (sender, sender_public) = address();
-
-        state.add_balance(&sender, &U256::from(69u64)).unwrap();
-
-        assert_eq!(
-            ParcelOutcome::Transactions(vec![TransactionOutcome {
-                invoice: Invoice::Success,
-                error: None,
-            }]),
-            state.apply(&parcel, &sender, &sender_public).unwrap()
-        );
-
-        assert_eq!(state.balance(&sender), Ok(58.into()));
-        assert_eq!(state.nonce(&sender), Ok(1.into()));
-
-        let asset_scheme_address = AssetSchemeAddress::new(transaction_hash, shard_id);
-        let asset_scheme = state.asset_scheme(shard_id, &asset_scheme_address);
-        assert_eq!(Ok(Some(AssetScheme::new(metadata.clone(), amount, registrar))), asset_scheme);
-
-        let asset_address = AssetAddress::new(transaction_hash, 0, shard_id);
-        let asset = state.asset(shard_id, &asset_address);
-        assert_eq!(Ok(Some(Asset::new(asset_scheme_address.into(), lock_script_hash, parameters, amount))), asset);
-    }
-
-    #[test]
-    fn mint_infinite_permissioned_asset() {
         let mut state = get_temp_state();
-        state.create_shard_level_state().unwrap();
-        state.commit().unwrap();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.commit());
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        assert_eq!(Ok(()), state.set_regular_key(&sender_public, &regular_public));
 
-        let shard_id = 0;
-
-        let metadata = "metadata".to_string();
-        let lock_script_hash = H256::random();
-        let parameters = vec![];
-        let registrar = Some(Address::random());
-        let transaction = Transaction::AssetMint {
-            network_id: 0xCA,
+        let create_world = Transaction::CreateWorld {
+            network_id,
             shard_id,
-            metadata: metadata.clone(),
-            output: AssetMintOutput {
-                lock_script_hash,
-                parameters: parameters.clone(),
-                amount: None,
-            },
-            registrar,
             nonce: 0,
+            owners: vec![sender],
         };
-        let transaction_hash = transaction.hash();
-        let transactions = vec![transaction];
-        let parcel = Parcel {
-            fee: 5.into(),
-            action: Action::ChangeShardState {
-                transactions,
-                changes: vec![ChangeShard {
-                    shard_id,
-                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
-                    post_root: H256::zero(),
-                }],
-                signatures: vec![],
-            },
-            nonce: 0.into(),
-            network_id: 0xCA,
-        };
-        let (sender, sender_public) = address();
-
-        state.add_balance(&sender, &U256::from(69u64)).unwrap();
-
-        assert_eq!(
-            ParcelOutcome::Transactions(vec![TransactionOutcome {
-                invoice: Invoice::Success,
-                error: None,
-            }]),
-            state.apply(&parcel, &sender, &sender_public).unwrap()
-        );
-
-        assert_eq!(state.balance(&sender), Ok(64.into()));
-        assert_eq!(state.nonce(&sender), Ok(1.into()));
-
-        let asset_scheme_address = AssetSchemeAddress::new(transaction_hash, shard_id);
-        let asset_scheme = state.asset_scheme(shard_id, &asset_scheme_address);
-        assert_eq!(Ok(Some(AssetScheme::new(metadata.clone(), ::std::u64::MAX, registrar))), asset_scheme);
-
-        let asset_address = AssetAddress::new(transaction_hash, 0, shard_id);
-        let asset = state.asset(shard_id, &asset_address);
-        assert_eq!(
-            Ok(Some(Asset::new(asset_scheme_address.into(), lock_script_hash, parameters, ::std::u64::MAX))),
-            asset
-        );
-    }
-
-    #[test]
-    fn mint_and_transfer_in_the_same_parcel() {
-        let mut state = get_temp_state();
-        state.create_shard_level_state().unwrap();
-        state.commit().unwrap();
-
-        let shard_id = 0x00;
-        let network_id = 0xBeef;
 
         let metadata = "metadata".to_string();
         let lock_script_hash = H256::from("07feab4c39250abf60b77d7589a5b61fdf409bd837e936376381d19db1e1f050");
-        let registrar = None;
+        let registrar = Some(sender);
         let amount = 30;
         let mint = Transaction::AssetMint {
+            world_id,
             network_id,
             shard_id,
             metadata: metadata.clone(),
@@ -1586,10 +1518,326 @@ mod tests_parcel {
             nonce: 0,
         };
         let mint_hash = mint.hash();
-
-        let asset_scheme_address = AssetSchemeAddress::new(mint_hash, shard_id);
+        let asset_scheme_address = AssetSchemeAddress::new(mint_hash, shard_id, world_id);
         let asset_type = asset_scheme_address.clone().into();
-        let asset_address = AssetAddress::new(mint_hash, 0, shard_id);
+
+        let transfer = Transaction::AssetTransfer {
+            network_id,
+            burns: vec![],
+            inputs: vec![AssetTransferInput {
+                prev_out: AssetOutPoint {
+                    transaction_hash: mint_hash,
+                    index: 0,
+                    asset_type,
+                    amount: 30,
+                },
+                lock_script: vec![0x30, 0x01],
+                unlock_script: vec![],
+            }],
+            outputs: vec![AssetTransferOutput {
+                lock_script_hash,
+                parameters: vec![vec![1]],
+                asset_type,
+                amount: 30,
+            }],
+            nonce: 0,
+        };
+        let transactions = vec![create_world, mint, transfer];
+        let parcel = Parcel {
+            fee: 11.into(),
+            action: Action::ChangeShardState {
+                transactions,
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(
+            Ok(ParcelInvoice::Multiple(vec![
+                TransactionInvoice::Success,
+                TransactionInvoice::Success,
+                TransactionInvoice::Success,
+            ])),
+            state.apply(&parcel, &regular_address, &regular_public)
+        );
+    }
+
+    #[test]
+    fn use_deleted_regular_key_as_master_key() {
+        let (sender, sender_public) = address();
+        let (regular_address, regular_public) = address();
+        let (_, regular_public2) = address();
+
+        let mut state = get_temp_state();
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        assert_eq!(Ok(()), state.set_regular_key(&sender_public, &regular_public));
+        assert_eq!(Ok(()), state.set_regular_key(&sender_public, &regular_public2));
+
+        assert_eq!(Ok(false), state.regular_account_exists_and_not_null(&regular_address));
+        assert_eq!(Ok(()), state.add_balance(&regular_address, &20.into()));
+
+        let parcel = Parcel {
+            action: Action::CreateShard,
+            fee: 5.into(),
+            nonce: 0.into(),
+            network_id: "tc".into(),
+        };
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &regular_address, &regular_public));
+        assert_eq!(Ok(14.into()), state.balance(&regular_address));
+        assert_eq!(Ok(20.into()), state.balance(&sender));
+        assert_eq!(Ok(Some(vec![regular_address])), state.shard_owners(0));
+    }
+
+    #[test]
+    fn fail_when_someone_sends_some_ccc_to_an_address_which_used_as_a_regular_key() {
+        let (sender, sender_public) = address();
+        let (regular_address, regular_public) = address();
+
+        let mut state = get_temp_state();
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        assert_eq!(Ok(()), state.set_regular_key(&sender_public, &regular_public));
+
+        let parcel = Parcel {
+            action: Action::Payment {
+                receiver: regular_address,
+                amount: 5.into(),
+            },
+            fee: 5.into(),
+            nonce: 0.into(),
+            network_id: "tc".into(),
+        };
+        let result = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(Err(StateError::Parcel(ParcelError::InvalidTransferDestination)), result);
+        assert_eq!(Ok(20.into()), state.balance(&sender));
+    }
+
+    #[test]
+    fn apply_error_for_action_failure() {
+        let mut state = get_temp_state();
+        let receiver = 1u64.into();
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::Payment {
+                receiver,
+                amount: 30.into(),
+            },
+            nonce: 0.into(),
+            network_id: "tc".into(),
+        };
+        let (sender, sender_public) = address();
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+
+        assert_eq!(
+            Ok(ParcelInvoice::SingleFail(ParcelError::InsufficientBalance {
+                address: sender,
+                balance: 15.into(),
+                cost: 30.into(),
+            })),
+            state.apply(&parcel, &sender, &sender_public)
+        );
+
+        assert_eq!(Ok(0.into()), state.balance(&receiver));
+        assert_eq!(Ok(15.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+    }
+
+    #[test]
+    fn mint_permissioned_asset() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.commit());
+
+        let network_id = "tc".into();
+        let shard_id = 0x0;
+        let world_id = 0;
+
+        let create_world = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce: 0,
+            owners: vec![sender],
+        };
+
+        let metadata = "metadata".to_string();
+        let lock_script_hash = H256::random();
+        let parameters = vec![];
+        let registrar = Some(Address::random());
+        let amount = 30;
+        let transaction = Transaction::AssetMint {
+            network_id,
+            shard_id,
+            world_id,
+            metadata: metadata.clone(),
+            output: AssetMintOutput {
+                lock_script_hash,
+                parameters: parameters.clone(),
+                amount: Some(amount),
+            },
+            registrar,
+            nonce: 0,
+        };
+        let transaction_hash = transaction.hash();
+        let parcel = Parcel {
+            fee: 11.into(),
+            action: Action::ChangeShardState {
+                transactions: vec![create_world, transaction],
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+
+        assert_eq!(
+            Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success, TransactionInvoice::Success])),
+            state.apply(&parcel, &sender, &sender_public)
+        );
+
+        assert_eq!(state.balance(&sender), Ok(58.into()));
+        assert_eq!(state.nonce(&sender), Ok(1.into()));
+
+        let asset_scheme_address = AssetSchemeAddress::new(transaction_hash, shard_id, world_id);
+        let asset_scheme = state.asset_scheme(shard_id, &asset_scheme_address);
+        assert_eq!(Ok(Some(AssetScheme::new(metadata.clone(), amount, registrar))), asset_scheme);
+
+        let asset_address = OwnedAssetAddress::new(transaction_hash, 0, shard_id);
+        let asset = state.asset(shard_id, &asset_address);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_scheme_address.into(), lock_script_hash, parameters, amount))), asset);
+    }
+
+    #[test]
+    fn mint_infinite_permissioned_asset() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.commit());
+
+        let shard_id = 0;
+        let world_id = 0;
+        let network_id = "tc".into();
+
+        let create_world = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce: 0,
+            owners: vec![sender],
+        };
+
+        let metadata = "metadata".to_string();
+        let lock_script_hash = H256::random();
+        let parameters = vec![];
+        let registrar = Some(Address::random());
+        let transaction = Transaction::AssetMint {
+            network_id,
+            shard_id,
+            world_id,
+            metadata: metadata.clone(),
+            output: AssetMintOutput {
+                lock_script_hash,
+                parameters: parameters.clone(),
+                amount: None,
+            },
+            registrar,
+            nonce: 0,
+        };
+        let transaction_hash = transaction.hash();
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::ChangeShardState {
+                transactions: vec![create_world, transaction],
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+
+        assert_eq!(
+            Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success, TransactionInvoice::Success])),
+            state.apply(&parcel, &sender, &sender_public)
+        );
+
+        assert_eq!(state.balance(&sender), Ok(64.into()));
+        assert_eq!(state.nonce(&sender), Ok(1.into()));
+
+        let asset_scheme_address = AssetSchemeAddress::new(transaction_hash, shard_id, world_id);
+        let asset_scheme = state.asset_scheme(shard_id, &asset_scheme_address);
+        assert_eq!(Ok(Some(AssetScheme::new(metadata.clone(), ::std::u64::MAX, registrar))), asset_scheme);
+
+        let asset_address = OwnedAssetAddress::new(transaction_hash, 0, shard_id);
+        let asset = state.asset(shard_id, &asset_address);
+        assert_eq!(
+            Ok(Some(OwnedAsset::new(asset_scheme_address.into(), lock_script_hash, parameters, ::std::u64::MAX))),
+            asset
+        );
+    }
+
+    #[test]
+    fn mint_and_transfer_in_the_same_parcel() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.commit());
+
+        let shard_id = 0x00;
+        let network_id = "tc".into();
+        let world_id = 0;
+
+        let create_world = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce: 0,
+            owners: vec![sender],
+        };
+
+        let metadata = "metadata".to_string();
+        let lock_script_hash = H256::from("07feab4c39250abf60b77d7589a5b61fdf409bd837e936376381d19db1e1f050");
+        let registrar = None;
+        let amount = 30;
+
+        let mint = Transaction::AssetMint {
+            network_id,
+            shard_id,
+            world_id,
+            metadata: metadata.clone(),
+            output: AssetMintOutput {
+                lock_script_hash,
+                parameters: vec![],
+                amount: Some(amount),
+            },
+            registrar,
+            nonce: 0,
+        };
+        let mint_hash = mint.hash();
+
+        let asset_scheme_address = AssetSchemeAddress::new(mint_hash, shard_id, world_id);
+        let asset_type = asset_scheme_address.clone().into();
+        let asset_address = OwnedAssetAddress::new(mint_hash, 0, shard_id);
 
         let random_lock_script_hash = H256::random();
         let transfer = Transaction::AssetTransfer {
@@ -1629,14 +1877,12 @@ mod tests_parcel {
         };
         let transfer_hash = transfer.hash();
 
-
-        let transactions = vec![mint, transfer];
         let parcel = Parcel {
             fee: 20.into(),
             nonce: 0.into(),
             network_id,
             action: Action::ChangeShardState {
-                transactions,
+                transactions: vec![create_world, mint, transfer],
                 changes: vec![ChangeShard {
                     shard_id,
                     pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
@@ -1645,20 +1891,14 @@ mod tests_parcel {
                 signatures: vec![],
             },
         };
-        let (sender, sender_public) = address();
 
-        state.add_balance(&sender, &U256::from(120)).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(120)));
 
         assert_eq!(
-            ParcelOutcome::Transactions(vec![
-                TransactionOutcome {
-                    invoice: Invoice::Success,
-                    error: None,
-                },
-                TransactionOutcome {
-                    invoice: Invoice::Success,
-                    error: None,
-                },
+            ParcelInvoice::Multiple(vec![
+                TransactionInvoice::Success,
+                TransactionInvoice::Success,
+                TransactionInvoice::Success,
             ]),
             state.apply(&parcel, &sender, &sender_public).unwrap()
         );
@@ -1672,27 +1912,37 @@ mod tests_parcel {
         let asset = state.asset(shard_id, &asset_address);
         assert_eq!(Ok(None), asset);
 
-        let asset0_address = AssetAddress::new(transfer_hash, 0, shard_id);
+        let asset0_address = OwnedAssetAddress::new(transfer_hash, 0, shard_id);
         let asset0 = state.asset(shard_id, &asset0_address);
-        assert_eq!(Ok(Some(Asset::new(asset_type, lock_script_hash, vec![vec![1]], 10))), asset0);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, lock_script_hash, vec![vec![1]], 10))), asset0);
 
-        let asset1_address = AssetAddress::new(transfer_hash, 1, shard_id);
+        let asset1_address = OwnedAssetAddress::new(transfer_hash, 1, shard_id);
         let asset1 = state.asset(shard_id, &asset1_address);
-        assert_eq!(Ok(Some(Asset::new(asset_type, lock_script_hash, vec![], 5))), asset1);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, lock_script_hash, vec![], 5))), asset1);
 
-        let asset2_address = AssetAddress::new(transfer_hash, 2, shard_id);
+        let asset2_address = OwnedAssetAddress::new(transfer_hash, 2, shard_id);
         let asset2 = state.asset(shard_id, &asset2_address);
-        assert_eq!(Ok(Some(Asset::new(asset_type, random_lock_script_hash, vec![], 15))), asset2);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, random_lock_script_hash, vec![], 15))), asset2);
     }
 
     #[test]
     fn mint_and_transfer_in_different_parcel() {
-        let mut state = get_temp_state();
-        state.create_shard_level_state().unwrap();
-        state.commit().unwrap();
+        let (sender, sender_public) = address();
 
-        let network_id = 0xBeef;
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.commit());
+
+        let network_id = "tc".into();
         let shard_id = 0x00;
+        let world_id = 0;
+
+        let create_world = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce: 0,
+            owners: vec![sender],
+        };
 
         let metadata = "metadata".to_string();
         let lock_script_hash = H256::from("07feab4c39250abf60b77d7589a5b61fdf409bd837e936376381d19db1e1f050");
@@ -1701,6 +1951,7 @@ mod tests_parcel {
         let mint = Transaction::AssetMint {
             network_id,
             shard_id,
+            world_id,
             metadata: metadata.clone(),
             output: AssetMintOutput {
                 lock_script_hash,
@@ -1717,7 +1968,7 @@ mod tests_parcel {
             network_id,
             nonce: 0.into(),
             action: Action::ChangeShardState {
-                transactions: vec![mint],
+                transactions: vec![create_world, mint],
                 changes: vec![ChangeShard {
                     shard_id,
                     pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
@@ -1726,26 +1977,22 @@ mod tests_parcel {
                 signatures: vec![],
             },
         };
-        let (sender, sender_public) = address();
 
-        state.add_balance(&sender, &U256::from(120)).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(120)));
 
         assert_eq!(
-            ParcelOutcome::Transactions(vec![TransactionOutcome {
-                invoice: Invoice::Success,
-                error: None,
-            }]),
-            state.apply(&mint_parcel, &sender, &sender_public).unwrap()
+            Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success, TransactionInvoice::Success])),
+            state.apply(&mint_parcel, &sender, &sender_public)
         );
         assert_eq!(state.balance(&sender), Ok(100.into()));
         assert_eq!(state.nonce(&sender), Ok(1.into()));
 
-        let asset_scheme_address = AssetSchemeAddress::new(mint_hash, shard_id);
+        let asset_scheme_address = AssetSchemeAddress::new(mint_hash, shard_id, world_id);
         let asset_type = asset_scheme_address.clone().into();
-        let asset_address = AssetAddress::new(mint_hash, 0, shard_id);
+        let asset_address = OwnedAssetAddress::new(mint_hash, 0, shard_id);
 
         let asset = state.asset(shard_id, &asset_address);
-        assert_eq!(Ok(Some(Asset::new(asset_type, lock_script_hash, vec![], 30))), asset);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, lock_script_hash, vec![], 30))), asset);
 
         let random_lock_script_hash = H256::random();
         let transfer = Transaction::AssetTransfer {
@@ -1785,6 +2032,8 @@ mod tests_parcel {
         };
         let transfer_hash = transfer.hash();
 
+        let current_shard_root = state.shard_root(shard_id).unwrap().unwrap();
+
         let transfer_parcel = Parcel {
             fee: 30.into(),
             network_id,
@@ -1793,7 +2042,7 @@ mod tests_parcel {
                 transactions: vec![transfer],
                 changes: vec![ChangeShard {
                     shard_id,
-                    pre_root: H256::from("0x3e56ec350ed779120d7b27472aef08fefa0e72165206275efa0b4c8419ba26db"),
+                    pre_root: current_shard_root,
                     post_root: H256::zero(),
                 }],
                 signatures: vec![],
@@ -1801,11 +2050,8 @@ mod tests_parcel {
         };
 
         assert_eq!(
-            ParcelOutcome::Transactions(vec![TransactionOutcome {
-                invoice: Invoice::Success,
-                error: None,
-            }]),
-            state.apply(&transfer_parcel, &sender, &sender_public).unwrap()
+            Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success])),
+            state.apply(&transfer_parcel, &sender, &sender_public)
         );
 
         assert_eq!(state.balance(&sender), Ok(70.into()));
@@ -1817,17 +2063,17 @@ mod tests_parcel {
         let asset = state.asset(shard_id, &asset_address);
         assert_eq!(Ok(None), asset);
 
-        let asset0_address = AssetAddress::new(transfer_hash, 0, shard_id);
+        let asset0_address = OwnedAssetAddress::new(transfer_hash, 0, shard_id);
         let asset0 = state.asset(shard_id, &asset0_address);
-        assert_eq!(Ok(Some(Asset::new(asset_type, lock_script_hash, vec![vec![1]], 10))), asset0);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, lock_script_hash, vec![vec![1]], 10))), asset0);
 
-        let asset1_address = AssetAddress::new(transfer_hash, 1, shard_id);
+        let asset1_address = OwnedAssetAddress::new(transfer_hash, 1, shard_id);
         let asset1 = state.asset(shard_id, &asset1_address);
-        assert_eq!(Ok(Some(Asset::new(asset_type, lock_script_hash, vec![], 5))), asset1);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, lock_script_hash, vec![], 5))), asset1);
 
-        let asset2_address = AssetAddress::new(transfer_hash, 2, shard_id);
+        let asset2_address = OwnedAssetAddress::new(transfer_hash, 2, shard_id);
         let asset2 = state.asset(shard_id, &asset2_address);
-        assert_eq!(Ok(Some(Asset::new(asset_type, random_lock_script_hash, vec![], 15))), asset2);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, random_lock_script_hash, vec![], 15))), asset2);
     }
 
     #[test]
@@ -1843,7 +2089,7 @@ mod tests_parcel {
         let state = get_temp_state();
 
         let shard_id = 3;
-        assert_eq!(Ok(None), state.asset(shard_id, &AssetAddress::new(H256::random(), 0, shard_id)));
+        assert_eq!(Ok(None), state.asset(shard_id, &OwnedAssetAddress::new(H256::random(), 0, shard_id)));
     }
 
 
@@ -1852,7 +2098,11 @@ mod tests_parcel {
         let state = get_temp_state();
 
         let shard_id = 3;
-        assert_eq!(Ok(None), state.asset_scheme(shard_id, &AssetSchemeAddress::new(H256::random(), shard_id)));
+        let world_id = 0;
+        assert_eq!(
+            Ok(None),
+            state.asset_scheme(shard_id, &AssetSchemeAddress::new(H256::random(), shard_id, world_id))
+        );
     }
 
     #[test]
@@ -1863,21 +2113,17 @@ mod tests_parcel {
             action: Action::CreateShard,
             fee: 5.into(),
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &20.into()).unwrap();
-        let res = state.apply(&parcel, &sender, &sender_public).unwrap();
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None,
-            },
-            res
-        );
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        let res = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), res);
         assert_eq!(Ok(14.into()), state.balance(&sender));
         assert_eq!(Ok(1.into()), state.nonce(&sender));
-        assert_ne!(None, state.shard_root(0).unwrap());
+        assert_ne!(Ok(None), state.shard_root(0));
+        assert_ne!(Ok(None), state.shard_root(0));
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(0));
     }
 
     #[test]
@@ -1888,23 +2134,18 @@ mod tests_parcel {
             action: Action::CreateShard,
             fee: 5.into(),
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &20.into()).unwrap();
-        let res = state.apply(&parcel, &sender, &sender_public).unwrap();
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None,
-            },
-            res
-        );
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        let res = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), res);
         assert_eq!(Ok(14.into()), state.balance(&sender));
         assert_eq!(Ok(1.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(0));
 
         let shard_id = 3;
-        assert_eq!(Ok(None), state.asset(shard_id, &AssetAddress::new(H256::random(), 0, shard_id)));
+        assert_eq!(Ok(None), state.asset(shard_id, &OwnedAssetAddress::new(H256::random(), 0, shard_id)));
     }
 
     #[test]
@@ -1915,23 +2156,22 @@ mod tests_parcel {
             action: Action::CreateShard,
             fee: 5.into(),
             nonce: 0.into(),
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &20.into()).unwrap();
-        let res = state.apply(&parcel, &sender, &sender_public).unwrap();
-        assert_eq!(
-            ParcelOutcome::Single {
-                invoice: Invoice::Success,
-                error: None,
-            },
-            res
-        );
+        assert_eq!(Ok(()), state.add_balance(&sender, &20.into()));
+        let res = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), res);
         assert_eq!(Ok(14.into()), state.balance(&sender));
         assert_eq!(Ok(1.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(0));
 
         let shard_id = 3;
-        assert_eq!(Ok(None), state.asset_scheme(shard_id, &AssetSchemeAddress::new(H256::random(), shard_id)));
+        let world_id = 0;
+        assert_eq!(
+            Ok(None),
+            state.asset_scheme(shard_id, &AssetSchemeAddress::new(H256::random(), shard_id, world_id))
+        );
     }
 
     #[test]
@@ -1939,14 +2179,16 @@ mod tests_parcel {
         let mut state = get_temp_state();
 
         let shard_id = 0;
+        let world_id = 0;
         let metadata = "metadata".to_string();
         let lock_script_hash = H256::random();
         let parameters = vec![];
         let registrar = Some(Address::random());
         let amount = 30;
         let transaction = Transaction::AssetMint {
-            network_id: 0xCA,
+            network_id: "tc".into(),
             shard_id,
+            world_id,
             metadata: metadata.clone(),
             output: AssetMintOutput {
                 lock_script_hash,
@@ -1969,26 +2211,25 @@ mod tests_parcel {
                 }],
                 signatures: vec![],
             },
-            network_id: 0xCA,
+            network_id: "tc".into(),
         };
         let (sender, sender_public) = address();
 
-        state.add_balance(&sender, &U256::from(69u64)).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
 
-        match state.apply(&parcel, &sender, &sender_public).unwrap_err() {
-            StateError::Parcel(err) => assert_eq!(ParcelError::InvalidShardId(0), err),
-            other => panic!("{:?}", other),
-        }
+        let res = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(Err(StateError::Parcel(ParcelError::InvalidShardId(0))), res);
     }
 
     #[test]
     fn transfer_on_invalid_parcel_must_fail() {
         let mut state = get_temp_state();
 
-        let network_id = 0xBeef;
+        let network_id = "tc".into();
         let shard_id = 100;
+        let world_id = 0;
 
-        let asset_type = AssetSchemeAddress::new(H256::zero(), shard_id).into();
+        let asset_type = AssetSchemeAddress::new(H256::zero(), shard_id, world_id).into();
         let transfer = Transaction::AssetTransfer {
             network_id,
             burns: vec![],
@@ -2041,11 +2282,511 @@ mod tests_parcel {
         };
 
         let (sender, sender_public) = address();
-        state.add_balance(&sender, &U256::from(120)).unwrap();
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(120)));
 
-        match state.apply(&parcel, &sender, &sender_public).unwrap_err() {
-            StateError::Parcel(err) => assert_eq!(ParcelError::InvalidShardId(100), err),
-            other => panic!("{:?}", other),
-        }
+        let res = state.apply(&parcel, &sender, &sender_public);
+        assert_eq!(Err(StateError::Parcel(ParcelError::InvalidShardId(100))), res);
+    }
+
+    #[test]
+    fn create_world_and_set_owners_in_the_same_parcel() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        let users = vec![];
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], users.clone()));
+        assert_eq!(Ok(()), state.commit());
+
+        let shard_id = 0x00;
+        let network_id = "tc".into();
+        let world_id = 0;
+
+        let owners = vec![Address::random(), Address::random()];
+
+        let t0 = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce: 0,
+            owners: vec![Address::random()],
+        };
+        let t1 = Transaction::SetWorldOwners {
+            network_id,
+            shard_id,
+            world_id,
+            nonce: 0,
+            owners: owners.clone(),
+        };
+
+        let transactions = vec![t0, t1];
+        let parcel = Parcel {
+            fee: 20.into(),
+            nonce: 0.into(),
+            network_id,
+            action: Action::ChangeShardState {
+                transactions,
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+        };
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &120.into()));
+        assert_eq!(Ok(120.into()), state.balance(&sender));
+
+        assert_eq!(
+            Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success, TransactionInvoice::Success])),
+            state.apply(&parcel, &sender, &sender_public)
+        );
+
+        assert_eq!(Ok(100.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+
+        assert_eq!(Ok(Some(World::new_with_nonce(owners, users, 1))), state.world(shard_id, world_id));
+    }
+
+    #[test]
+    fn create_world_and_set_owners_in_different_parcel() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        let users = vec![];
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], users.clone()));
+        assert_eq!(Ok(()), state.commit());
+
+        let shard_id = 0x00;
+        let network_id = "tc".into();
+        let world_id = 0;
+
+        assert_eq!(Ok(()), state.add_balance(&sender, &120.into()));
+        assert_eq!(Ok(120.into()), state.balance(&sender));
+
+        let old_owners = vec![Address::random(), Address::random(), Address::random()];
+        let new_owners = vec![Address::random(), Address::random()];
+
+        let t0 = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce: 0,
+            owners: old_owners.clone(),
+        };
+
+        let parcel0 = Parcel {
+            fee: 20.into(),
+            nonce: 0.into(),
+            network_id,
+            action: Action::ChangeShardState {
+                transactions: vec![t0],
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+        };
+
+        assert_eq!(
+            Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success])),
+            state.apply(&parcel0, &sender, &sender_public)
+        );
+
+        assert_eq!(Ok(100.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(World::new_with_nonce(old_owners, users.clone(), 0))), state.world(shard_id, world_id));
+
+        let t1 = Transaction::SetWorldOwners {
+            network_id,
+            shard_id,
+            world_id,
+            nonce: 0,
+            owners: new_owners.clone(),
+        };
+
+        let parcel1 = Parcel {
+            fee: 30.into(),
+            nonce: 1.into(),
+            network_id,
+            action: Action::ChangeShardState {
+                transactions: vec![t1],
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::zero(),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+        };
+
+        assert_eq!(
+            Ok(ParcelInvoice::Multiple(vec![TransactionInvoice::Success])),
+            state.apply(&parcel1, &sender, &sender_public)
+        );
+
+        assert_eq!(Ok(70.into()), state.balance(&sender));
+        assert_eq!(Ok(2.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(World::new_with_nonce(new_owners, users, 1))), state.world(shard_id, world_id));
+    }
+
+    #[test]
+    fn set_shard_owners() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        let network_id = "tc".into();
+        let shard_id = 0;
+        let owners = vec![Address::random(), Address::random(), sender];
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetShardOwners {
+                shard_id,
+                owners: owners.clone(),
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(shard_id));
+
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &sender, &sender_public));
+
+        assert_eq!(Ok(64.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(owners)), state.shard_owners(shard_id));
+    }
+
+    #[test]
+    fn new_owners_must_contain_sender() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        let network_id = "tc".into();
+        let shard_id = 0;
+        let owners = {
+            let a1 = loop {
+                let a = Address::random();
+                if a != sender {
+                    break a
+                }
+            };
+            let a2 = loop {
+                let a = Address::random();
+                if a != sender {
+                    break a
+                }
+            };
+            vec![a1, a2]
+        };
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetShardOwners {
+                shard_id,
+                owners,
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(shard_id));
+
+        assert_eq!(Err(ParcelError::NewOwnersMustContainSender.into()), state.apply(&parcel, &sender, &sender_public));
+
+        assert_eq!(Ok(69.into()), state.balance(&sender));
+        assert_eq!(Ok(0.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(shard_id));
+    }
+
+    #[test]
+    fn only_owner_can_set_owners() {
+        let (original_owner, _) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![original_owner], vec![]));
+        let (sender, sender_public) = address();
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        let network_id = "tc".into();
+        let shard_id = 0;
+
+        let owners = {
+            let a1 = loop {
+                let a = Address::random();
+                if a != original_owner {
+                    break a
+                }
+            };
+            let a2 = loop {
+                let a = Address::random();
+                if a != original_owner {
+                    break a
+                }
+            };
+            vec![a1, a2, sender]
+        };
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetShardOwners {
+                shard_id,
+                owners,
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(Some(vec![original_owner])), state.shard_owners(shard_id));
+
+        assert_eq!(Err(ParcelError::InsufficientPermission.into()), state.apply(&parcel, &sender, &sender_public));
+
+        assert_eq!(Ok(69.into()), state.balance(&sender));
+        assert_eq!(Ok(0.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(vec![original_owner])), state.shard_owners(shard_id));
+    }
+
+    #[test]
+    fn set_shard_owners_fail_on_invalid_shard_id() {
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], vec![]));
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        let network_id = "tc".into();
+        let real_shard_id = 0;
+        let shard_id = 0xF;
+
+        let owners = vec![Address::random(), Address::random(), sender];
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetShardOwners {
+                shard_id,
+                owners: owners.clone(),
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(real_shard_id));
+        assert_eq!(Ok(None), state.shard_owners(shard_id));
+
+        assert_eq!(Err(ParcelError::InvalidShardId(shard_id).into()), state.apply(&parcel, &sender, &sender_public));
+
+        assert_eq!(Ok(69.into()), state.balance(&sender));
+        assert_eq!(Ok(0.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(real_shard_id));
+        assert_eq!(Ok(None), state.shard_owners(shard_id));
+    }
+
+    #[test]
+    fn user_cannot_set_owners() {
+        let (original_owner, _) = address();
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![original_owner], vec![sender]));
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        let network_id = "CA".into();
+        let shard_id = 0;
+
+        let owners = {
+            let a1 = loop {
+                let a = Address::random();
+                if a != original_owner {
+                    break a
+                }
+            };
+            let a2 = loop {
+                let a = Address::random();
+                if a != original_owner {
+                    break a
+                }
+            };
+            vec![a1, a2, sender]
+        };
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetShardOwners {
+                shard_id,
+                owners,
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(Some(vec![original_owner])), state.shard_owners(shard_id));
+
+        assert_eq!(Err(ParcelError::InsufficientPermission.into()), state.apply(&parcel, &sender, &sender_public));
+
+        assert_eq!(Ok(69.into()), state.balance(&sender));
+        assert_eq!(Ok(0.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(vec![original_owner])), state.shard_owners(shard_id));
+    }
+
+
+    #[test]
+    fn user_can_mint() {
+        let (original_owner, _) = address();
+        let (sender, sender_public) = address();
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![original_owner], vec![sender]));
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        let shard_id = 0x00;
+        let network_id = "ne".into();
+        let world_id = 0;
+
+        let metadata = "metadata".to_string();
+        let lock_script_hash = H256::from("07feab4c39250abf60b77d7589a5b61fdf409bd837e936376381d19db1e1f050");
+        let registrar = None;
+        let amount = 30;
+        let parameters = vec![];
+
+        let create_world = Transaction::CreateWorld {
+            network_id,
+            shard_id,
+            nonce: 0,
+            owners: vec![sender],
+        };
+        let mint = Transaction::AssetMint {
+            network_id,
+            shard_id,
+            world_id,
+            metadata: metadata.clone(),
+            output: AssetMintOutput {
+                lock_script_hash,
+                parameters: parameters.clone(),
+                amount: Some(amount),
+            },
+            registrar,
+            nonce: 0,
+        };
+        let mint_hash = mint.hash();
+
+        let asset_scheme_address = AssetSchemeAddress::new(mint_hash, shard_id, world_id);
+        let asset_address = OwnedAssetAddress::new(mint_hash, 0, shard_id);
+
+        let parcel = Parcel {
+            fee: 20.into(),
+            nonce: 0.into(),
+            network_id,
+            action: Action::ChangeShardState {
+                transactions: vec![create_world, mint],
+                changes: vec![ChangeShard {
+                    shard_id,
+                    pre_root: H256::from("0xa8ed01b49cd63c6a547ac3ce357539aa634fb44331a351e3e98b9f1c3a8e3edf"),
+                    post_root: H256::zero(),
+                }],
+                signatures: vec![],
+            },
+        };
+
+        assert_eq!(
+            ParcelInvoice::Multiple(vec![TransactionInvoice::Success, TransactionInvoice::Success]),
+            state.apply(&parcel, &sender, &sender_public).unwrap()
+        );
+
+        assert_eq!(Ok(0x31.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+
+        let asset_scheme = state.asset_scheme(shard_id, &asset_scheme_address);
+        assert_eq!(Ok(Some(AssetScheme::new(metadata.clone(), amount, registrar))), asset_scheme);
+
+        let asset_type = asset_scheme_address.into();
+        let asset = state.asset(shard_id, &asset_address);
+        assert_eq!(Ok(Some(OwnedAsset::new(asset_type, lock_script_hash, parameters, amount))), asset);
+    }
+
+    #[test]
+    fn set_shard_users() {
+        let network_id = "a2".into();
+        let shard_id = 0;
+
+        let (sender, sender_public) = address();
+        let old_users = vec![Address::random(), Address::random(), Address::random()];
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(vec![sender], old_users.clone()));
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(shard_id));
+        assert_eq!(Ok(Some(old_users.clone())), state.shard_users(shard_id));
+
+        let new_users = vec![Address::random(), Address::random(), sender];
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetShardUsers {
+                shard_id,
+                users: new_users.clone(),
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Ok(ParcelInvoice::SingleSuccess), state.apply(&parcel, &sender, &sender_public));
+
+        assert_eq!(Ok(64.into()), state.balance(&sender));
+        assert_eq!(Ok(1.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(vec![sender])), state.shard_owners(shard_id));
+        assert_eq!(Ok(Some(new_users)), state.shard_users(shard_id));
+    }
+
+
+    #[test]
+    fn user_cannot_set_shard_users() {
+        let network_id = "a2".into();
+        let shard_id = 0;
+
+        let (sender, sender_public) = address();
+        let owners = vec![Address::random(), Address::random(), Address::random()];
+        let old_users = vec![Address::random(), Address::random(), Address::random(), sender];
+
+        let mut state = get_temp_state();
+        assert_eq!(Ok(()), state.create_shard_level_state(owners.clone(), old_users.clone()));
+        assert_eq!(Ok(()), state.add_balance(&sender, &U256::from(69u64)));
+        assert_eq!(Ok(()), state.commit());
+
+        assert_eq!(Ok(Some(owners.clone())), state.shard_owners(shard_id));
+        assert_eq!(Ok(Some(old_users.clone())), state.shard_users(shard_id));
+
+        let new_users = vec![Address::random(), Address::random(), sender];
+
+        let parcel = Parcel {
+            fee: 5.into(),
+            action: Action::SetShardUsers {
+                shard_id,
+                users: new_users.clone(),
+            },
+            nonce: 0.into(),
+            network_id,
+        };
+
+        assert_eq!(Err(ParcelError::InsufficientPermission.into()), state.apply(&parcel, &sender, &sender_public));
+
+        assert_eq!(Ok(69.into()), state.balance(&sender));
+        assert_eq!(Ok(0.into()), state.nonce(&sender));
+        assert_eq!(Ok(Some(owners)), state.shard_owners(shard_id));
+        assert_eq!(Ok(Some(old_users)), state.shard_users(shard_id));
     }
 }

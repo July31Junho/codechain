@@ -19,6 +19,7 @@ extern crate codechain_crypto as crypto;
 extern crate lazy_static;
 extern crate bech32;
 extern crate heapsize;
+extern crate parking_lot;
 extern crate primitives;
 extern crate rand;
 extern crate rlp;
@@ -26,45 +27,44 @@ extern crate rustc_hex;
 extern crate rustc_serialize;
 extern crate secp256k1;
 extern crate serde;
+#[macro_use]
+extern crate serde_derive;
 extern crate serde_json;
 
 mod address;
-#[cfg(feature = "ecdsa")]
 mod ecdsa;
 mod error;
 mod exchange;
 mod keypair;
 mod network;
+mod password;
+mod platform_address;
 mod private;
 mod random;
-#[cfg(feature = "schnorr")]
 mod schnorr;
 
-pub use address::FullAddress;
-#[cfg(feature = "ecdsa")]
+pub use address::Address;
 pub use ecdsa::{
     recover_ecdsa as recover, sign_ecdsa as sign, verify_ecdsa as verify, verify_ecdsa_address as verify_address,
-    ECDSASignature as Signature, ECDSASignatureData as SignatureData, ECDSA_SIGNATURE_LENGTH as SIGNATURE_LENGTH,
+    ECDSASignature as Signature, ECDSA_SIGNATURE_LENGTH as SIGNATURE_LENGTH,
 };
 pub use error::Error;
 pub use exchange::exchange;
 pub use keypair::{public_to_address, KeyPair};
-pub use network::Network;
-use primitives::{H160, H256, H512};
+pub use network::NetworkId;
+pub use password::Password;
+pub use platform_address::PlatformAddress;
+use primitives::{H256, H512};
 pub use private::Private;
 pub use random::Random;
 pub use rustc_serialize::hex;
-#[cfg(feature = "schnorr")]
 pub use schnorr::{
-    recover_schnorr as recover, sign_schnorr as sign, verify_schnorr as verify,
-    verify_schnorr_address as verify_address, SchnorrSignature as Signature, SchnorrSignatureData as SignatureData,
-    SCHNORR_SIGNATURE_LENGTH as SIGNATURE_LENGTH,
+    recover_schnorr, sign_schnorr, verify_schnorr, verify_schnorr_address, SchnorrSignature, SCHNORR_SIGNATURE_LENGTH,
 };
 
 /// 32 bytes long signable message
 pub type Message = H256;
 
-pub type Address = H160;
 pub type Secret = H256;
 pub type Public = H512;
 

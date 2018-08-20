@@ -19,14 +19,13 @@ use std::collections::HashSet;
 use ccrypto::BLAKE_NULL_RLP;
 use ckey::Address;
 use cmerkle::skewed_merkle_root;
-use cmerkle::TrieFactory;
 use cstate::{StateDB, StateError, StateWithCache, TopLevelState};
-use ctypes::invoice::{Invoice, ParcelInvoice};
+use ctypes::invoice::ParcelInvoice;
 use ctypes::machine::{LiveBlock, Parcels};
-use ctypes::parcel::{Error as ParcelError, Outcome as ParcelOutcome};
+use ctypes::parcel::Error as ParcelError;
+use ctypes::util::unexpected::Mismatch;
 use primitives::{Bytes, H256};
 use rlp::{Decodable, DecoderError, Encodable, RlpStream, UntrustedRlp};
-use unexpected::Mismatch;
 
 use super::consensus::CodeChainEngine;
 use super::error::{BlockError, Error};
@@ -120,7 +119,6 @@ impl<'x> OpenBlock<'x> {
     /// Create a new `OpenBlock` ready for parcel pushing.
     pub fn new(
         engine: &'x CodeChainEngine,
-        trie_factory: TrieFactory,
         db: StateDB,
         parent: &Header,
         author: Address,
@@ -128,7 +126,7 @@ impl<'x> OpenBlock<'x> {
         is_epoch_begin: bool,
     ) -> Result<Self, Error> {
         let number = parent.number() + 1;
-        let state = TopLevelState::from_existing(db, *parent.state_root(), trie_factory).map_err(StateError::from)?;
+        let state = TopLevelState::from_existing(db, *parent.state_root()).map_err(StateError::from)?;
         let mut r = OpenBlock {
             block: ExecutedBlock::new(state),
             engine,
@@ -155,23 +153,11 @@ impl<'x> OpenBlock<'x> {
             return Err(StateError::Parcel(ParcelError::ParcelAlreadyImported).into())
         }
 
-        let outcomes = self.block.state.apply(&parcel, parcel.sender(), &parcel.public_key())?;
+        let invoice = self.block.state.apply(&parcel, parcel.sender(), &parcel.public_key())?;
 
         self.block.parcels_set.insert(h.unwrap_or_else(|| parcel.hash()));
         self.block.parcels.push(parcel.into());
-        match outcomes {
-            ParcelOutcome::Single {
-                invoice,
-                ..
-            } => {
-                self.block.invoices.push(ParcelInvoice::Single(invoice));
-            }
-            ParcelOutcome::Transactions(invoices) => {
-                self.block
-                    .invoices
-                    .push(invoices.into_iter().map(|outcome| outcome.invoice).collect::<Vec<Invoice>>().into());
-            }
-        }
+        self.block.invoices.push(invoice);
         Ok(())
     }
 
@@ -210,7 +196,7 @@ impl<'x> OpenBlock<'x> {
         self.block.header.set_state_root(self.block.state.root().clone());
         self.block.header.set_invoices_root(skewed_merkle_root(
             parent_invoices_root,
-            self.block.invoices.iter().flat_map(|invoices| invoices.iter().map(|invoice| invoice.rlp_bytes())),
+            self.block.invoices.iter().flat_map(|invoices| invoices.iter_result().map(|invoice| invoice.rlp_bytes())),
         ));
 
         ClosedBlock {
@@ -237,7 +223,10 @@ impl<'x> OpenBlock<'x> {
         if self.block.header.invoices_root().is_zero() || self.block.header.invoices_root() == &BLAKE_NULL_RLP {
             self.block.header.set_invoices_root(skewed_merkle_root(
                 parent_invoices_root,
-                self.block.invoices.iter().flat_map(|invoices| invoices.iter().map(|invoice| invoice.rlp_bytes())),
+                self.block
+                    .invoices
+                    .iter()
+                    .flat_map(|invoices| invoices.iter_result().map(|invoice| invoice.rlp_bytes())),
             ));
         }
         self.block.header.set_state_root(self.block.state.root().clone());
@@ -432,10 +421,9 @@ pub fn enact(
     engine: &CodeChainEngine,
     db: StateDB,
     parent: &Header,
-    trie_factory: TrieFactory,
     is_epoch_begin: bool,
 ) -> Result<LockedBlock, Error> {
-    let mut b = OpenBlock::new(engine, trie_factory, db, parent, Address::new(), vec![], is_epoch_begin)?;
+    let mut b = OpenBlock::new(engine, db, parent, Address::default(), vec![], is_epoch_begin)?;
 
     b.populate_from(header);
     b.push_parcels(parcels)?;
@@ -447,20 +435,19 @@ pub fn enact(
 mod tests {
     use ckey::Address;
 
-    use super::super::spec::Spec;
+    use super::super::scheme::Scheme;
     use super::super::tests::helpers::get_temp_state_db;
     use super::OpenBlock;
 
     #[test]
     fn open_block() {
-        let spec = Spec::new_test();
-        let genesis_header = spec.genesis_header();
-        let db = spec.ensure_genesis_state(get_temp_state_db(), &Default::default()).unwrap();
-        let b = OpenBlock::new(&*spec.engine, Default::default(), db, &genesis_header, Address::zero(), vec![], false)
-            .unwrap();
+        let scheme = Scheme::new_test();
+        let genesis_header = scheme.genesis_header();
+        let db = scheme.ensure_genesis_state(get_temp_state_db()).unwrap();
+        let b = OpenBlock::new(&*scheme.engine, db, &genesis_header, Address::default(), vec![], false).unwrap();
         let parent_parcels_root = genesis_header.parcels_root().clone();
         let parent_invoices_root = genesis_header.invoices_root().clone();
         let b = b.close_and_lock(parent_parcels_root, parent_invoices_root);
-        let _ = b.seal(&*spec.engine, vec![]);
+        let _ = b.seal(&*scheme.engine, vec![]);
     }
 }

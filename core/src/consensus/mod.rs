@@ -37,11 +37,11 @@ pub use self::validator_set::ValidatorSet;
 use std::fmt;
 use std::sync::{Arc, Weak};
 
-use ckey::{Address, Signature};
+use ckey::{Address, Password, Signature};
 use cnetwork::NetworkExtension;
 use ctypes::machine::Machine;
+use ctypes::util::unexpected::{Mismatch, OutOfBounds};
 use primitives::{Bytes, H256, U256};
-use unexpected::{Mismatch, OutOfBounds};
 
 use self::epoch::{EpochVerifier, NoOp, PendingTransition};
 use super::account_provider::AccountProvider;
@@ -50,7 +50,7 @@ use super::codechain_machine::CodeChainMachine;
 use super::error::Error;
 use super::header::Header;
 use super::parcel::{SignedParcel, UnverifiedParcel};
-use super::spec::CommonParams;
+use super::scheme::CommonParams;
 
 /// Seal type.
 #[derive(Debug, PartialEq, Eq)]
@@ -215,7 +215,7 @@ pub trait ConsensusEngine<M: Machine>: Sync + Send {
     fn broadcast_proposal_block(&self, _block: SealedBlock) {}
 
     /// Register an account which signs consensus messages.
-    fn set_signer(&self, _ap: Arc<AccountProvider>, _address: Address, _password: String) {}
+    fn set_signer(&self, _ap: Arc<AccountProvider>, _address: Address, _password: Option<Password>) {}
 
     /// Sign using the EngineSigner, to be used for consensus parcel signing.
     fn sign(&self, _hash: H256) -> Result<Signature, Error> {

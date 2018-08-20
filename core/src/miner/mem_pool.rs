@@ -548,7 +548,6 @@ impl MemPool {
         if self.local_parcels.contains(parcel_hash) {
             match reason {
                 RemovalReason::Invalid => self.local_parcels.mark_invalid(parcel.parcel.into()),
-                RemovalReason::NotAllowed => self.local_parcels.mark_invalid(parcel.parcel.into()),
                 RemovalReason::Canceled => self.local_parcels.mark_canceled(parcel.parcel.into()),
             }
         }
@@ -1085,8 +1084,6 @@ pub enum RemovalReason {
     /// Parcel was canceled
     #[allow(dead_code)]
     Canceled,
-    /// Parcel is not allowed,
-    NotAllowed,
 }
 
 fn check_too_cheap(is_in: bool) -> Result<(), ParcelError> {
@@ -1122,7 +1119,7 @@ pub mod test {
     use super::*;
 
     #[test]
-    fn test_ordering() {
+    fn ordering() {
         assert_eq!(ParcelOrigin::Local.cmp(&ParcelOrigin::External), Ordering::Less);
         assert_eq!(ParcelOrigin::RetractedBlock.cmp(&ParcelOrigin::Local), Ordering::Less);
         assert_eq!(ParcelOrigin::RetractedBlock.cmp(&ParcelOrigin::External), Ordering::Less);
@@ -1138,7 +1135,7 @@ pub mod test {
         let parcel = Parcel {
             nonce: U256::zero(),
             fee,
-            network_id: 200,
+            network_id: "tc".into(),
             action: Action::ChangeShardState {
                 transactions: vec![],
                 changes: vec![],
@@ -1157,9 +1154,11 @@ pub mod test {
         let shard_id = 0xCCC;
 
         let fee = U256::from(100);
+        let world_id = 0;
         let transactions = vec![Transaction::AssetMint {
-            network_id: 200,
+            network_id: "tc".into(),
             shard_id,
+            world_id,
             metadata: "Metadata".to_string(),
             output: AssetMintOutput {
                 lock_script_hash: H256::zero(),
@@ -1172,7 +1171,7 @@ pub mod test {
         let parcel = Parcel {
             nonce: U256::zero(),
             fee,
-            network_id: 200,
+            network_id: "tc".into(),
             action: Action::ChangeShardState {
                 transactions,
                 changes: vec![ChangeShard {
@@ -1195,10 +1194,12 @@ pub mod test {
         let shard_id = 0;
 
         let fee = U256::from(100);
+        let world_id = 0;
         let transactions = vec![
             Transaction::AssetMint {
-                network_id: 200,
+                network_id: "tc".into(),
                 shard_id,
+                world_id,
                 metadata: "Metadata".to_string(),
                 output: AssetMintOutput {
                     lock_script_hash: H256::zero(),
@@ -1209,7 +1210,7 @@ pub mod test {
                 nonce: 0,
             },
             Transaction::AssetTransfer {
-                network_id: 0,
+                network_id: "tc".into(),
                 burns: vec![],
                 inputs: vec![],
                 outputs: vec![],
@@ -1219,7 +1220,7 @@ pub mod test {
         let parcel = Parcel {
             nonce: U256::zero(),
             fee,
-            network_id: 200,
+            network_id: "tc".into(),
             action: Action::ChangeShardState {
                 transactions,
                 changes: vec![ChangeShard {
@@ -1246,7 +1247,7 @@ pub mod test {
         let parcel = Parcel {
             nonce: U256::zero(),
             fee,
-            network_id: 200,
+            network_id: "tc".into(),
             action: Action::Payment {
                 receiver,
                 amount,
@@ -1259,7 +1260,7 @@ pub mod test {
     }
 
     #[test]
-    fn test_fee_per_byte_order_simple() {
+    fn fee_per_byte_order_simple() {
         let order1 = create_parcel_order(U256::from(1000_000_000), 100);
         let order2 = create_parcel_order(U256::from(1500_000_000), 200);
         assert_eq!(true, order1.fee_per_byte > order2.fee_per_byte);
@@ -1267,7 +1268,7 @@ pub mod test {
     }
 
     #[test]
-    fn test_fee_per_byte_order_sort() {
+    fn fee_per_byte_order_sort() {
         let factors: Vec<Vec<usize>> = vec![
             vec![4, 9],   // 0.44
             vec![2, 9],   // 0.22
@@ -1293,7 +1294,7 @@ pub mod test {
 
     fn create_parcel_order(fee: U256, transaction_count: usize) -> ParcelOrder {
         let transaction = Transaction::AssetTransfer {
-            network_id: 0,
+            network_id: "tc".into(),
             burns: vec![],
             inputs: vec![],
             outputs: vec![],
@@ -1303,7 +1304,7 @@ pub mod test {
         let parcel = Parcel {
             nonce: U256::zero(),
             fee,
-            network_id: 200,
+            network_id: "tc".into(),
             action: Action::ChangeShardState {
                 transactions: vec![transaction; transaction_count],
                 changes: vec![ChangeShard {

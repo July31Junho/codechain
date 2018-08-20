@@ -15,9 +15,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use ccore::{LocalizedParcel, SignedParcel};
-use ckey::SignatureData;
-use ctypes::parcel::Action;
+use ckey::{NetworkId, Signature};
 use primitives::{H256, U256};
+
+use super::Action;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,10 +28,10 @@ pub struct Parcel {
     pub parcel_index: Option<usize>,
     pub nonce: U256,
     pub fee: U256,
-    pub network_id: u64,
+    pub network_id: NetworkId,
     pub action: Action,
     pub hash: H256,
-    pub sig: SignatureData,
+    pub sig: Signature,
 }
 
 impl From<LocalizedParcel> for Parcel {
@@ -43,7 +44,7 @@ impl From<LocalizedParcel> for Parcel {
             nonce: p.nonce,
             fee: p.fee,
             network_id: p.network_id,
-            action: p.action.clone(),
+            action: Action::from_core(p.as_unsigned().action.clone(), p.network_id),
             hash: p.hash(),
             sig: sig.into(),
         }
@@ -60,7 +61,7 @@ impl From<SignedParcel> for Parcel {
             nonce: p.nonce,
             fee: p.fee,
             network_id: p.network_id,
-            action: p.action.clone(),
+            action: Action::from_core(p.as_unsigned().action.clone(), p.network_id),
             hash: p.hash(),
             sig: sig.into(),
         }

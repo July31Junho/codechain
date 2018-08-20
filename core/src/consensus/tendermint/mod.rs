@@ -23,16 +23,16 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
 
 use ccrypto::blake256;
-use ckey::{public_to_address, recover, Address, Message, Signature, SignatureData};
+use ckey::{public_to_address, recover, Address, Message, Password, Signature};
 use cnetwork::{Api, NetworkExtension, NodeId, TimerToken};
 use ctypes::machine::WithBalances;
+use ctypes::util::unexpected::{Mismatch, OutOfBounds};
 use ctypes::BlockNumber;
 use parking_lot::{Mutex, RwLock};
 use primitives::{Bytes, H256, U128, U256};
 use rand::{thread_rng, Rng};
 use rlp::{self, Decodable, DecoderError, Encodable, RlpStream, UntrustedRlp};
 use time::Duration;
-use unexpected::{Mismatch, OutOfBounds};
 
 use self::message::*;
 pub use self::params::{TendermintParams, TendermintTimeouts};
@@ -103,11 +103,11 @@ pub type BlockHash = H256;
 
 struct ProposalSeal<'a> {
     view: &'a View,
-    signature: &'a SignatureData,
+    signature: &'a Signature,
 }
 
 impl<'a> ProposalSeal<'a> {
-    fn new(view: &'a View, signature: &'a SignatureData) -> Self {
+    fn new(view: &'a View, signature: &'a Signature) -> Self {
         Self {
             view,
             signature,
@@ -125,11 +125,11 @@ impl<'a> ProposalSeal<'a> {
 
 struct RegularSeal<'a> {
     view: &'a View,
-    signatures: &'a Vec<SignatureData>,
+    signatures: &'a Vec<Signature>,
 }
 
 impl<'a> RegularSeal<'a> {
-    fn new(view: &'a View, signatures: &'a Vec<SignatureData>) -> Self {
+    fn new(view: &'a View, signatures: &'a Vec<Signature>) -> Self {
         Self {
             view,
             signatures,
@@ -219,7 +219,7 @@ impl Tendermint {
         } else {
             Err(EngineError::NotProposer(Mismatch {
                 expected: proposer,
-                found: address.clone(),
+                found: *address,
             }))
         }
     }
@@ -370,7 +370,7 @@ impl Tendermint {
         let r = self.view.load(AtomicOrdering::SeqCst);
         let s = *self.step.read();
         let vote_info = message_info_rlp(&VoteStep::new(h, r, s), block_hash);
-        match (self.signer.read().address(), self.sign(blake256(&vote_info)).map(Into::into)) {
+        match (self.signer.read().address(), self.sign(blake256(&vote_info))) {
             (Some(validator), Ok(signature)) => {
                 let message_rlp = message_full_rlp(&signature, &vote_info);
                 let message = ConsensusMessage::new(signature, h, r, s, block_hash);
@@ -481,7 +481,7 @@ impl ConsensusEngine<CodeChainMachine> for Tendermint {
         let view = self.view.load(AtomicOrdering::SeqCst);
         let bh = Some(header.bare_hash());
         let vote_info = message_info_rlp(&VoteStep::new(height, view, Step::Propose), bh.clone());
-        if let Ok(signature) = self.sign(blake256(&vote_info)).map(Into::into) {
+        if let Ok(signature) = self.sign(blake256(&vote_info)) {
             // Insert Propose vote.
             cdebug!(ENGINE, "Submitting proposal {} at height {} view {}.", header.bare_hash(), height, view);
             let sender = self.signer.read().address().expect("seals_internally already returned true");
@@ -579,7 +579,8 @@ impl ConsensusEngine<CodeChainMachine> for Tendermint {
 
     fn on_close_block(&self, block: &mut ExecutedBlock) -> Result<(), Error> {
         let author = *block.header().author();
-        self.machine.add_balance(block, &author, &self.block_reward)
+        let total_reward = block.parcels().iter().fold(self.block_reward, |sum, parcel| sum + parcel.fee);
+        self.machine.add_balance(block, &author, &total_reward)
     }
 
     fn handle_message(&self, rlp: &[u8]) -> Result<(), EngineError> {
@@ -720,7 +721,7 @@ impl ConsensusEngine<CodeChainMachine> for Tendermint {
         header.set_score(new_score);
     }
 
-    fn set_signer(&self, ap: Arc<AccountProvider>, address: Address, password: String) {
+    fn set_signer(&self, ap: Arc<AccountProvider>, address: Address, password: Option<Password>) {
         {
             self.signer.write().set(ap, address, password);
         }
@@ -781,7 +782,7 @@ where
         let mut addresses = HashSet::new();
         let ref header_signatures_field = header.seal().get(2).ok_or(BlockError::InvalidSeal)?;
         for rlp in UntrustedRlp::new(header_signatures_field).iter() {
-            let signature: SignatureData = rlp.as_val()?;
+            let signature: Signature = rlp.as_val()?;
             let address = (self.recover)(&signature.into(), &message)?;
 
             if !self.subchain_validators.contains(header.parent_hash(), &address) {
@@ -973,19 +974,70 @@ impl NetworkExtension for TendermintExtension {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use ccrypto::blake256;
+    use ckey::Address;
+    use primitives::Bytes;
+
+    use super::super::super::account_provider::AccountProvider;
+    use super::super::super::block::{ClosedBlock, IsBlock, OpenBlock};
+    use super::super::super::consensus::CodeChainEngine;
     use super::super::super::error::{BlockError, Error};
     use super::super::super::header::Header;
-    use super::super::super::spec::Spec;
+    use super::super::super::scheme::Scheme;
+    use super::super::super::tests::helpers::get_temp_state_db;
+    use super::{message_info_rlp, EngineError, Height, ProposalSeal, RegularSeal, Seal, Step, View, VoteStep};
+
+    /// Accounts inserted with "0" and "1" are validators. First proposer is "0".
+    fn setup() -> (Scheme, Arc<AccountProvider>) {
+        let tap = AccountProvider::transient_provider();
+        let scheme = Scheme::new_test_tendermint();
+        (scheme, tap)
+    }
+
+    fn propose_default(scheme: &Scheme, proposer: Address) -> (ClosedBlock, Vec<Bytes>) {
+        let db = get_temp_state_db();
+        let db = scheme.ensure_genesis_state(db).unwrap();
+        let genesis_header = scheme.genesis_header();
+        let b = OpenBlock::new(scheme.engine.as_ref(), db.clone(), &genesis_header, proposer, vec![], false).unwrap();
+        let b = b.close(*genesis_header.parcels_root(), *genesis_header.invoices_root());
+        if let Seal::Proposal(seal) = scheme.engine.generate_seal(b.block(), &genesis_header) {
+            (b, seal)
+        } else {
+            panic!()
+        }
+    }
+
+    fn proposal_seal(tap: &Arc<AccountProvider>, header: &Header, view: View) -> Vec<Bytes> {
+        let author = header.author();
+        let vote_info =
+            message_info_rlp(&VoteStep::new(header.number() as Height, view, Step::Propose), Some(header.bare_hash()));
+        let signature = tap.sign(*author, None, blake256(vote_info)).unwrap();
+        ProposalSeal::new(&view, &signature).seal_fields()
+    }
+
+    fn insert_and_unlock(tap: &Arc<AccountProvider>, acc: &str) -> Address {
+        let addr = tap.insert_account(blake256(acc).into(), &acc.into()).unwrap();
+        tap.unlock_account_permanently(addr, acc.into()).unwrap();
+        addr
+    }
+
+    fn insert_and_register(tap: &Arc<AccountProvider>, engine: &CodeChainEngine, acc: &str) -> Address {
+        let addr = insert_and_unlock(tap, acc);
+        engine.set_signer(tap.clone(), addr.clone(), Some(acc.into()));
+        addr
+    }
 
     #[test]
     fn has_valid_metadata() {
-        let engine = Spec::new_test_tendermint().engine;
+        let engine = Scheme::new_test_tendermint().engine;
         assert!(!engine.name().is_empty());
     }
 
     #[test]
     fn verification_fails_on_short_seal() {
-        let engine = Spec::new_test_tendermint().engine;
+        let engine = Scheme::new_test_tendermint().engine;
         let header = Header::default();
 
         let verify_result = engine.verify_block_basic(&header);
@@ -999,5 +1051,105 @@ mod tests {
                 panic!("Should be error, got Ok");
             }
         }
+    }
+
+    #[test]
+    fn generate_seal() {
+        let (scheme, tap) = setup();
+
+        let proposer = insert_and_register(&tap, scheme.engine.as_ref(), "1");
+
+        let (b, seal) = propose_default(&scheme, proposer);
+        assert!(b.lock().try_seal(scheme.engine.as_ref(), seal).is_ok());
+    }
+
+    #[test]
+    fn recognize_proposal() {
+        let (spec, tap) = setup();
+
+        let proposer = insert_and_register(&tap, spec.engine.as_ref(), "1");
+
+        let (b, seal) = propose_default(&spec, proposer);
+        let sealed = b.lock().seal(spec.engine.as_ref(), seal).unwrap();
+        assert!(spec.engine.is_proposal(sealed.header()));
+    }
+
+    #[test]
+    fn allows_correct_proposer() {
+        let (spec, tap) = setup();
+        let engine = spec.engine;
+
+        let mut header = Header::default();
+        header.set_number(1);
+        let validator = insert_and_unlock(&tap, "1");
+        header.set_author(validator);
+        let seal = proposal_seal(&tap, &header, 0);
+        header.set_seal(seal);
+        // Good proposer.
+        assert!(engine.verify_block_external(&header).is_ok());
+
+        let validator = insert_and_unlock(&tap, "0");
+        header.set_author(validator);
+        let seal = proposal_seal(&tap, &header, 0);
+        header.set_seal(seal);
+        // Bad proposer.
+        match engine.verify_block_external(&header) {
+            Err(Error::Engine(EngineError::NotProposer(_))) => {}
+            _ => panic!(),
+        }
+
+        let random = insert_and_unlock(&tap, "101");
+        header.set_author(random);
+        let seal = proposal_seal(&tap, &header, 0);
+        header.set_seal(seal);
+        // Not authority.
+        match engine.verify_block_external(&header) {
+            Err(Error::Engine(EngineError::NotAuthorized(_))) => {}
+            _ => panic!(),
+        };
+        engine.stop();
+    }
+
+    #[test]
+    fn seal_signatures_checking() {
+        let (spec, tap) = setup();
+        let engine = spec.engine;
+
+        let mut header = Header::default();
+        header.set_number(2);
+        let proposer = insert_and_unlock(&tap, "0");
+        header.set_author(proposer);
+
+        let vote_info = message_info_rlp(&VoteStep::new(2, 0, Step::Precommit), Some(header.bare_hash()));
+        let signature0 = tap.sign(proposer, None, blake256(&vote_info)).unwrap();
+
+        header.set_seal(RegularSeal::new(&0, &vec![signature0]).seal_fields());
+
+        // One good signature is not enough.
+        match engine.verify_block_external(&header) {
+            Err(Error::Engine(EngineError::BadSealFieldSize(_))) => {}
+            _ => panic!(),
+        }
+
+        let voter = insert_and_unlock(&tap, "1");
+        let signature1 = tap.sign(voter, None, blake256(&vote_info)).unwrap();
+        let voter = insert_and_unlock(&tap, "2");
+        let signature2 = tap.sign(voter, None, blake256(&vote_info)).unwrap();
+
+        header.set_seal(RegularSeal::new(&0, &vec![signature0, signature1, signature2]).seal_fields());
+
+        assert!(engine.verify_block_external(&header).is_ok());
+
+        let bad_voter = insert_and_unlock(&tap, "101");
+        let bad_signature = tap.sign(bad_voter, None, blake256(vote_info)).unwrap();
+
+        header.set_seal(RegularSeal::new(&0, &vec![signature0, signature1, bad_signature]).seal_fields());
+
+        // Two good and one bad signature.
+        match engine.verify_block_external(&header) {
+            Err(Error::Engine(EngineError::NotAuthorized(_))) => {}
+            _ => panic!(),
+        };
+        engine.stop();
     }
 }

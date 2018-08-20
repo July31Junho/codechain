@@ -18,7 +18,7 @@ mod params;
 
 use std::sync::{Arc, Weak};
 
-use ckey::{public_to_address, recover, Address, Signature, SignatureData};
+use ckey::{public_to_address, recover, Address, Password, Signature};
 use ctypes::machine::WithBalances;
 use parking_lot::RwLock;
 use primitives::{H256, U256};
@@ -70,7 +70,7 @@ fn verify_external(header: &Header, validators: &ValidatorSet) -> Result<(), Err
     use rlp::UntrustedRlp;
 
     // Check if the signature belongs to a validator, can depend on parent state.
-    let sig = UntrustedRlp::new(&header.seal()[0]).as_val::<SignatureData>()?;
+    let sig = UntrustedRlp::new(&header.seal()[0]).as_val::<Signature>()?;
     let signer = public_to_address(&recover(&sig.into(), &header.bare_hash())?);
 
     if *header.author() != signer {
@@ -112,7 +112,7 @@ impl ConsensusEngine<CodeChainMachine> for SoloAuthority {
         if self.validators.contains(header.parent_hash(), author) {
             // account should be permanently unlocked, otherwise sealing will fail
             if let Ok(signature) = self.sign(header.bare_hash()) {
-                return Seal::Regular(vec![::rlp::encode(&(&SignatureData::from(signature) as &[u8])).into_vec()])
+                return Seal::Regular(vec![::rlp::encode(&signature).into_vec()])
             } else {
                 ctrace!(SOLO_AUTHORITY, "generate_seal: FAIL: accounts secret key unavailable");
             }
@@ -178,7 +178,8 @@ impl ConsensusEngine<CodeChainMachine> for SoloAuthority {
 
     fn on_close_block(&self, block: &mut ExecutedBlock) -> Result<(), Error> {
         let author = *block.header().author();
-        self.machine.add_balance(block, &author, &self.block_reward)
+        let total_reward = block.parcels().iter().fold(self.block_reward, |sum, parcel| sum + parcel.fee);
+        self.machine.add_balance(block, &author, &total_reward)
     }
 
     fn register_client(&self, client: Weak<EngineClient>) {
@@ -186,7 +187,7 @@ impl ConsensusEngine<CodeChainMachine> for SoloAuthority {
     }
 
     /// Register an account which signs consensus messages.
-    fn set_signer(&self, ap: Arc<AccountProvider>, address: Address, password: String) {
+    fn set_signer(&self, ap: Arc<AccountProvider>, address: Address, password: Option<Password>) {
         self.signer.write().set(ap, address, password);
     }
 
@@ -197,38 +198,37 @@ impl ConsensusEngine<CodeChainMachine> for SoloAuthority {
 
 #[cfg(test)]
 mod tests {
-    use ckey::SignatureData;
+    use ckey::Signature;
 
     use super::super::super::block::{IsBlock, OpenBlock};
     use super::super::super::header::Header;
-    use super::super::super::spec::Spec;
+    use super::super::super::scheme::Scheme;
     use super::super::super::tests::helpers::get_temp_state_db;
     use super::super::Seal;
 
     #[test]
     fn has_valid_metadata() {
-        let engine = Spec::new_test_solo_authority().engine;
+        let engine = Scheme::new_test_solo_authority().engine;
         assert!(!engine.name().is_empty());
     }
 
     #[test]
-    fn can_do_signature_verification_fail() {
-        let engine = Spec::new_test_solo_authority().engine;
+    fn fail_to_verify_signature_when_seal_is_invalid() {
+        let engine = Scheme::new_test_solo_authority().engine;
         let mut header: Header = Header::default();
-        header.set_seal(vec![::rlp::encode(&SignatureData::default()).into_vec()]);
+        header.set_seal(vec![::rlp::encode(&Signature::default()).into_vec()]);
 
         let verify_result = engine.verify_block_external(&header);
         assert!(verify_result.is_err());
     }
 
     #[test]
-    fn can_generate_seal() {
-        let spec = Spec::new_test_solo_authority();
-        let engine = &*spec.engine;
-        let db = spec.ensure_genesis_state(get_temp_state_db(), &Default::default()).unwrap();
-        let genesis_header = spec.genesis_header();
-        let b =
-            OpenBlock::new(engine, Default::default(), db, &genesis_header, Default::default(), vec![], false).unwrap();
+    fn generate_seal() {
+        let scheme = Scheme::new_test_solo_authority();
+        let engine = &*scheme.engine;
+        let db = scheme.ensure_genesis_state(get_temp_state_db()).unwrap();
+        let genesis_header = scheme.genesis_header();
+        let b = OpenBlock::new(engine, db, &genesis_header, Default::default(), vec![], false).unwrap();
         let parent_parcels_root = genesis_header.parcels_root().clone();
         let parent_invoices_root = genesis_header.invoices_root().clone();
         let b = b.close_and_lock(parent_parcels_root, parent_invoices_root);
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn seals_internally() {
-        let engine = Spec::new_test_solo_authority().engine;
+        let engine = Scheme::new_test_solo_authority().engine;
         assert!(!engine.seals_internally().unwrap());
     }
 }

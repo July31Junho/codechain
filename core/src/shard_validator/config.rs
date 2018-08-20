@@ -18,5 +18,4 @@ use ckey::Address;
 
 pub struct ShardValidatorConfig {
     pub account: Address,
-    pub password_path: Option<String>,
 }

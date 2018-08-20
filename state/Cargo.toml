@@ -8,7 +8,7 @@ byteorder = "1.2.3"
 codechain-crypto = { path = "../crypto" }
 codechain-logger = { path = "../util/logger" }
 codechain-merkle = { path = "../util/merkle" }
-codechain-key = { path = "../key", features = ["ecdsa"] }
+codechain-key = { path = "../key" }
 codechain-types = { path = "../types" }
 codechain-vm = { path = "../vm" }
 hashdb = { path = "../util/hashdb" }
@@ -23,5 +23,4 @@ rlp = { path = "../util/rlp" }
 rustc-hex = "1.0"
 serde = "1.0"
 serde_derive = "1.0"
-unexpected = { path = "../util/unexpected" }
 util-error = { path = "../util/error" }

@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use ccrypto::Blake;
-use ckey::{Address, Public, SignatureData};
+use ckey::{Address, Public, Signature};
 use primitives::{Bytes, H256, U256};
 use rlp::{Decodable, DecoderError, Encodable, RlpStream, UntrustedRlp};
 
@@ -26,24 +26,24 @@ const CHANGE_SHARD_STATE: u8 = 1;
 const PAYMENT: u8 = 2;
 const SET_REGULAR_KEY: u8 = 3;
 const CREATE_SHARD: u8 = 4;
-const CUSTOM: u8 = 5;
+const SET_SHARD_OWNERS: u8 = 5;
+const SET_SHARD_USERS: u8 = 6;
+const CUSTOM: u8 = 0xFF;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, RlpDecodable, RlpEncodable)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, RlpDecodable, RlpEncodable)]
 pub struct ChangeShard {
     pub shard_id: ShardId,
     pub pre_root: H256,
     pub post_root: H256,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", tag = "action")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     ChangeShardState {
         /// Transaction, can be either asset mint or asset transfer
         transactions: Vec<Transaction>,
         changes: Vec<ChangeShard>,
-        signatures: Vec<SignatureData>,
+        signatures: Vec<Signature>,
     },
     Payment {
         receiver: Address,
@@ -54,6 +54,14 @@ pub enum Action {
         key: Public,
     },
     CreateShard,
+    SetShardOwners {
+        shard_id: ShardId,
+        owners: Vec<Address>,
+    },
+    SetShardUsers {
+        shard_id: ShardId,
+        users: Vec<Address>,
+    },
     Custom(Bytes),
 }
 
@@ -97,6 +105,24 @@ impl Encodable for Action {
             Action::CreateShard => {
                 s.begin_list(1);
                 s.append(&CREATE_SHARD);
+            }
+            Action::SetShardOwners {
+                shard_id,
+                owners,
+            } => {
+                s.begin_list(3);
+                s.append(&SET_SHARD_OWNERS);
+                s.append(shard_id);
+                s.append_list(owners);
+            }
+            Action::SetShardUsers {
+                shard_id,
+                users,
+            } => {
+                s.begin_list(3);
+                s.append(&SET_SHARD_USERS);
+                s.append(shard_id);
+                s.append_list(users);
             }
             Action::Custom(bytes) => {
                 s.begin_list(2);
@@ -143,6 +169,24 @@ impl Decodable for Action {
                 }
                 Ok(Action::CreateShard)
             }
+            SET_SHARD_OWNERS => {
+                if rlp.item_count()? != 3 {
+                    return Err(DecoderError::RlpIncorrectListLen)
+                }
+                Ok(Action::SetShardOwners {
+                    shard_id: rlp.val_at(1)?,
+                    owners: rlp.list_at(2)?,
+                })
+            }
+            SET_SHARD_USERS => {
+                if rlp.item_count()? != 3 {
+                    return Err(DecoderError::RlpIncorrectListLen)
+                }
+                Ok(Action::SetShardUsers {
+                    shard_id: rlp.val_at(1)?,
+                    users: rlp.list_at(2)?,
+                })
+            }
             CUSTOM => {
                 if rlp.item_count()? != 2 {
                     return Err(DecoderError::RlpIncorrectListLen)
@@ -151,5 +195,26 @@ impl Decodable for Action {
             }
             _ => Err(DecoderError::Custom("Unexpected action prefix")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_and_decode_set_shard_owners() {
+        rlp_encode_and_decode_test!(Action::SetShardOwners {
+            shard_id: 1,
+            owners: vec![Address::random(), Address::random()],
+        });
+    }
+
+    #[test]
+    fn encode_and_decode_set_shard_users() {
+        rlp_encode_and_decode_test!(Action::SetShardUsers {
+            shard_id: 1,
+            users: vec![Address::random(), Address::random()],
+        });
     }
 }

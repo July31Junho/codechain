@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use ccrypto::{blake256, BLAKE_EMPTY, BLAKE_NULL_RLP};
-use ckey::{sign, KeyPair, Private, SignatureData};
+use ckey::{sign, KeyPair, Private, Signature};
 use primitives::{H160, H256};
 
 use secp256k1::key::{SecretKey, MINUS_ONE_KEY, ONE_KEY};
@@ -76,7 +76,7 @@ fn valid_pay_to_public_key() {
     let keypair = KeyPair::from_private(Private::from(SecretKey::from(ONE_KEY))).unwrap();
     let pubkey = <&[u8]>::from(keypair.public()).to_vec();
     let message = blake256("asdf");
-    let signature = SignatureData::from(sign(keypair.private(), &message).unwrap()).to_vec();
+    let signature = Signature::from(sign(keypair.private(), &message).unwrap()).to_vec();
     let unlock_script = vec![Instruction::PushB(signature)];
     let lock_script = vec![Instruction::PushB(pubkey), Instruction::ChkSig];
 
@@ -91,7 +91,7 @@ fn invalid_pay_to_public_key() {
     let lock_script = vec![Instruction::PushB(pubkey), Instruction::ChkSig];
 
     let invalid_keypair = KeyPair::from_private(Private::from(SecretKey::from(MINUS_ONE_KEY))).unwrap();
-    let invalid_signature = SignatureData::from(sign(invalid_keypair.private(), &message).unwrap()).to_vec();
+    let invalid_signature = Signature::from(sign(invalid_keypair.private(), &message).unwrap()).to_vec();
     let unlock_script = vec![Instruction::PushB(invalid_signature)];
 
     assert_eq!(execute(&unlock_script[..], &[], &lock_script, message, Config::default()), Ok(ScriptResult::Fail));
@@ -111,7 +111,7 @@ fn conditional_burn() {
 }
 
 #[test]
-fn test_blake256() {
+fn _blake256() {
     let lock_script = vec![Instruction::Blake256, Instruction::Eq];
     assert_eq!(
         execute(&[], &[vec![], BLAKE_EMPTY.to_vec()], &lock_script, H256::default(), Config::default()),
@@ -132,7 +132,7 @@ fn test_blake256() {
 }
 
 #[test]
-fn test_ripemd160() {
+fn _ripemd160() {
     const RIPEMD160_EMPTY: H160 = H160([
         0x9c, 0x11, 0x85, 0xa5, 0xc5, 0xe9, 0xfc, 0x54, 0x61, 0x28, 0x08, 0x97, 0x7e, 0xe8, 0xf5, 0x48, 0xb2, 0x25,
         0x8d, 0x31,
@@ -161,7 +161,7 @@ fn test_ripemd160() {
 }
 
 #[test]
-fn test_sha256() {
+fn _sha256() {
     const SHA256_EMPTY: H256 = H256([
         0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae,
         0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
@@ -190,7 +190,7 @@ fn test_sha256() {
 }
 
 #[test]
-fn test_keccak256() {
+fn _keccak256() {
     const KECCAK256_EMPTY: H256 = H256([
         0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c, 0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03, 0xc0, 0xe5, 0x00,
         0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b, 0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,

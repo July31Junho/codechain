@@ -15,10 +15,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use ccrypto::{blake256, keccak256, ripemd160, sha256};
-use ckey::{verify, Public, Signature, SignatureData, SIGNATURE_LENGTH};
+use ckey::{verify, Public, Signature, SIGNATURE_LENGTH};
 use primitives::H256;
 
-use instruction::{is_valid_unlock_script, Instruction};
+use instruction::{has_expensive_opcodes, is_valid_unlock_script, Instruction};
 
 const DEFAULT_MAX_MEMORY: usize = 1024;
 
@@ -152,6 +152,10 @@ pub fn execute(
         return Ok(ScriptResult::Fail)
     }
 
+    if has_expensive_opcodes(unlock) {
+        return Ok(ScriptResult::Fail)
+    }
+
     let param_scripts: Vec<_> = params.iter().map(|p| Instruction::PushB(p.clone())).rev().collect();
     let script = [unlock, &param_scripts, lock].concat();
 
@@ -211,8 +215,7 @@ pub fn execute(
             }
             Instruction::ChkSig => {
                 let pubkey = Public::from_slice(stack.pop()?.assert_len(64)?.as_ref());
-                let signature =
-                    Signature::from(SignatureData::from(stack.pop()?.assert_len(SIGNATURE_LENGTH)?.as_ref()));
+                let signature = Signature::from(Signature::from(stack.pop()?.assert_len(SIGNATURE_LENGTH)?.as_ref()));
                 let result = match verify(&pubkey, &signature, &tx_hash) {
                     Ok(true) => 1,
                     _ => 0,

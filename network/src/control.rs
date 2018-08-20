@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::net::IpAddr;
 use std::result::Result;
 
 use primitives::H256;
@@ -25,6 +26,23 @@ pub trait Control: Send + Sync {
     fn connect(&self, addr: SocketAddr) -> Result<(), Error>;
     fn disconnect(&self, addr: SocketAddr) -> Result<(), Error>;
     fn is_connected(&self, addr: &SocketAddr) -> Result<bool, Error>;
+    fn get_port(&self) -> Result<u16, Error>;
+    fn get_peer_count(&self) -> Result<usize, Error>;
+
+    fn add_to_whitelist(&self, addr: IpAddr) -> Result<(), Error>;
+    fn remove_from_whitelist(&self, addr: &IpAddr) -> Result<(), Error>;
+
+    fn add_to_blacklist(&self, addr: IpAddr) -> Result<(), Error>;
+    fn remove_from_blacklist(&self, addr: &IpAddr) -> Result<(), Error>;
+
+    fn enable_whitelist(&self) -> Result<(), Error>;
+    fn disable_whitelist(&self) -> Result<(), Error>;
+
+    fn enable_blacklist(&self) -> Result<(), Error>;
+    fn disable_blacklist(&self) -> Result<(), Error>;
+
+    fn get_whitelist(&self) -> Result<(Vec<IpAddr>, bool), Error>;
+    fn get_blacklist(&self) -> Result<(Vec<IpAddr>, bool), Error>;
 }
 
 #[derive(Clone, Debug)]

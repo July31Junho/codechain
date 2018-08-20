@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+extern crate codechain_key as ckey;
 extern crate primitives;
 extern crate rustc_hex;
 extern crate serde;
@@ -23,5 +24,5 @@ extern crate serde_derive;
 
 pub mod bytes;
 pub mod hash;
-pub mod spec;
+pub mod scheme;
 pub mod uint;

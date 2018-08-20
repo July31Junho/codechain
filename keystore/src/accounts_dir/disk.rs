@@ -287,13 +287,13 @@ mod test {
     use std::{env, fs};
 
     #[test]
-    fn should_create_new_account() {
+    fn create_new_account() {
         // given
         let mut dir = env::temp_dir();
         dir.push("keystore_should_create_new_account");
         let _ = fs::remove_dir_all(&dir);
         let keypair = Random.generate().unwrap();
-        let password = "hello world";
+        let password = &"hello world".into();
         let directory = RootDiskDirectory::create(dir.clone()).unwrap();
 
         // when
@@ -309,13 +309,13 @@ mod test {
     }
 
     #[test]
-    fn should_handle_duplicate_filenames() {
+    fn handle_duplicate_filenames() {
         // given
         let mut dir = env::temp_dir();
         dir.push("keystore_should_handle_duplicate_filenames");
         let _ = fs::remove_dir_all(&dir);
         let keypair = Random.generate().unwrap();
-        let password = "hello world";
+        let password = &"hello world".into();
         let directory = RootDiskDirectory::create(dir.clone()).unwrap();
 
         // when
@@ -351,7 +351,7 @@ mod test {
         assert_eq!(hash, 15130871412783076140);
 
         let keypair = Random.generate().unwrap();
-        let password = "test pass";
+        let password = &"test pass".into();
         let account = SafeAccount::create(&keypair, [0u8; 16], password, 1024, "Test".to_string(), "{}".to_string());
         directory.insert(account.unwrap()).expect("Account should be inserted ok");
 

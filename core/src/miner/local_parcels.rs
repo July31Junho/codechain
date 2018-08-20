@@ -172,7 +172,7 @@ mod tests {
     use primitives::U256;
 
     #[test]
-    fn should_add_parcel_as_pending() {
+    fn add_parcel_as_pending() {
         // given
         let mut list = LocalParcelsList::default();
 
@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn should_clear_old_parcels() {
+    fn clear_old_parcels() {
         // given
         let mut list = LocalParcelsList::new(1);
         let parcel1 = new_parcel(10.into());
@@ -222,7 +222,7 @@ mod tests {
                 changes: vec![],
                 signatures: vec![],
             },
-            network_id: 0u64,
+            network_id: "tc".into(),
         };
         SignedParcel::new_with_sign(parcel, keypair.private())
     }

@@ -21,10 +21,10 @@ use std::time::Instant;
 
 use cio::IoChannel;
 use ckey::{Address, Public};
-use cmerkle::{Result as TrieResult, TrieFactory, TrieSpec};
+use cmerkle::Result as TrieResult;
 use cnetwork::NodeId;
 use cstate::{
-    ActionHandler, Asset, AssetAddress, AssetScheme, AssetSchemeAddress, StateDB, TopBackend, TopLevelState,
+    ActionHandler, AssetScheme, AssetSchemeAddress, OwnedAsset, OwnedAssetAddress, StateDB, TopBackend, TopLevelState,
     TopStateInfo,
 };
 use ctypes::invoice::ParcelInvoice;
@@ -45,12 +45,12 @@ use super::super::blockchain::{
 use super::super::consensus::epoch::Transition as EpochTransition;
 use super::super::consensus::CodeChainEngine;
 use super::super::encoded;
-use super::super::error::{BlockImportError, Error, ImportError, SpecError};
+use super::super::error::{BlockImportError, Error, ImportError, SchemeError};
 use super::super::header::Header;
 use super::super::miner::{Miner, MinerService};
 use super::super::parcel::{LocalizedParcel, SignedParcel, UnverifiedParcel};
+use super::super::scheme::{CommonParams, Scheme};
 use super::super::service::ClientIoMessage;
-use super::super::spec::{CommonParams, Spec};
 use super::super::types::{BlockId, BlockStatus, ParcelId, TransactionId, VerificationQueueInfo as BlockQueueInfo};
 use super::super::verification::queue::{BlockQueue, HeaderQueue};
 use super::super::verification::{self, PreverifiedBlock, Verifier};
@@ -58,8 +58,8 @@ use super::super::views::{BlockView, HeaderView};
 use super::{
     AccountData, AssetClient, Balance, BlockChain as BlockChainTrait, BlockChainClient, BlockChainInfo, BlockInfo,
     BlockProducer, ChainInfo, ChainNotify, ClientConfig, DatabaseClient, EngineClient, EngineInfo,
-    Error as ClientError, ExecuteClient, ImportBlock, ImportResult, ImportSealedBlock, Invoice, MiningBlockChainClient,
-    Nonce, ParcelInfo, PrepareOpenBlock, RegularKey, ReopenBlock, Shard, StateOrBlock, TransactionInfo,
+    Error as ClientError, ExecuteClient, ImportBlock, ImportResult, ImportSealedBlock, MiningBlockChainClient, Nonce,
+    ParcelInfo, PrepareOpenBlock, RegularKey, ReopenBlock, Shard, StateOrBlock, TransactionInfo, TransactionInvoice,
 };
 
 const MAX_MEM_POOL_SIZE: usize = 4096;
@@ -81,7 +81,6 @@ pub struct Client {
 
     /// Count of pending parcels in the queue
     queue_parcels: AtomicUsize,
-    trie_factory: TrieFactory,
 
     importer: Importer,
 }
@@ -89,36 +88,29 @@ pub struct Client {
 impl Client {
     pub fn new(
         config: ClientConfig,
-        spec: &Spec,
+        scheme: &Scheme,
         db: Arc<KeyValueDB>,
         miner: Arc<Miner>,
         message_channel: IoChannel<ClientIoMessage>,
     ) -> Result<Arc<Client>, Error> {
-        let trie_spec = match config.fat_db {
-            true => unreachable!(),
-            false => TrieSpec::Generic,
-        };
-
-        let trie_factory = TrieFactory::new(trie_spec);
-
         let journal_db = journaldb::new(db.clone(), journaldb::Algorithm::Archive, ::db::COL_STATE);
-        let mut state_db = StateDB::new(journal_db, config.state_cache_size, spec.custom_handlers.clone());
-        if !spec.check_genesis_root(state_db.as_hashdb()) {
-            return Err(SpecError::InvalidState.into())
+        let mut state_db = StateDB::new(journal_db, config.state_cache_size, scheme.custom_handlers.clone());
+        if !scheme.check_genesis_root(state_db.as_hashdb()) {
+            return Err(SchemeError::InvalidState.into())
         }
         if state_db.journal_db().is_empty() {
             // Sets the correct state root.
-            state_db = spec.ensure_genesis_state(state_db, &trie_factory)?;
+            state_db = scheme.ensure_genesis_state(state_db)?;
             let mut batch = DBTransaction::new();
-            state_db.journal_under(&mut batch, 0, &spec.genesis_header().hash())?;
+            state_db.journal_under(&mut batch, 0, &scheme.genesis_header().hash())?;
             db.write(batch).map_err(ClientError::Database)?;
         }
 
-        let gb = spec.genesis_block();
+        let gb = scheme.genesis_block();
         let chain = Arc::new(BlockChain::new(&gb, db.clone()));
-        spec.check_genesis_common_params(&*chain)?;
+        scheme.check_genesis_common_params(&*chain)?;
 
-        let engine = spec.engine.clone();
+        let engine = scheme.engine.clone();
 
         let importer = Importer::new(&config, engine.clone(), message_channel.clone(), miner)?;
 
@@ -130,7 +122,6 @@ impl Client {
             state_db: RwLock::new(state_db),
             notify: RwLock::new(Vec::new()),
             queue_parcels: AtomicUsize::new(0),
-            trie_factory,
             importer,
         });
 
@@ -224,11 +215,8 @@ impl Client {
     /// Get a copy of the best block's state.
     pub fn latest_state(&self) -> TopLevelState {
         let header = self.best_block_header();
-        TopLevelState::from_existing(
-            self.state_db.read().clone_canon(&header.hash()),
-            header.state_root(),
-            self.trie_factory.clone(),
-        ).expect("State root of best block header always valid.")
+        TopLevelState::from_existing(self.state_db.read().clone_canon(&header.hash()), header.state_root())
+            .expect("State root of best block header always valid.")
     }
 
     /// Attempt to get a copy of a specific block's final state.
@@ -247,7 +235,7 @@ impl Client {
             let db = self.state_db.read().clone();
 
             let root = header.state_root();
-            TopLevelState::from_existing(db, root, self.trie_factory.clone()).ok()
+            TopLevelState::from_existing(db, root).ok()
         })
     }
 }
@@ -268,25 +256,83 @@ impl AssetClient for Client {
         }
     }
 
-    fn get_asset(&self, transaction_hash: H256, index: usize, id: BlockId) -> TrieResult<Option<Asset>> {
+    fn get_asset(&self, transaction_hash: H256, index: usize, id: BlockId) -> TrieResult<Option<OwnedAsset>> {
         if let Some(state) = Client::state_at(&self, id) {
             let shard_id = 0; // FIXME
-            let address = AssetAddress::new(transaction_hash, index, shard_id);
+            let address = OwnedAssetAddress::new(transaction_hash, index, shard_id);
             Ok(state.asset(shard_id, &address)?)
         } else {
             Ok(None)
         }
     }
+
+    /// Checks whether an asset is spent or not.
+    ///
+    /// It returns None if such an asset never existed in the shard at the given block.
+    fn is_asset_spent(
+        &self,
+        transaction_hash: H256,
+        index: usize,
+        shard_id: ShardId,
+        block_id: BlockId,
+    ) -> TrieResult<Option<bool>> {
+        match self.transaction_address(transaction_hash.into()) {
+            Some(ref transaction_address)
+                if self.block_number(block_id)
+                    >= self.block_number(transaction_address.parcel_address.block_hash.into()) =>
+            {
+                let is_output_valid = match self.transaction(transaction_hash.into()) {
+                    Some(Transaction::CreateWorld {
+                        ..
+                    }) => false,
+                    Some(Transaction::SetWorldOwners {
+                        ..
+                    }) => false,
+                    Some(Transaction::SetWorldUsers {
+                        ..
+                    }) => false,
+                    Some(Transaction::AssetMint {
+                        shard_id: asset_mint_shard_id,
+                        ..
+                    }) => index == 0 && shard_id == asset_mint_shard_id,
+                    Some(Transaction::AssetTransfer {
+                        outputs,
+                        ..
+                    }) => {
+                        index < outputs.len()
+                            && shard_id
+                                == AssetSchemeAddress::from_hash(outputs[index].asset_type)
+                                    .expect("An asset type must be able to create an AssetSchemeAddress")
+                                    .shard_id()
+                    }
+                    None => false,
+                };
+
+                if !is_output_valid {
+                    return Ok(None)
+                }
+
+                match Client::state_at(&self, block_id) {
+                    Some(state) => {
+                        let address = OwnedAssetAddress::new(transaction_hash, index, shard_id);
+                        Ok(Some(state.asset(shard_id, &address)?.is_none()))
+                    }
+                    None => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl ExecuteClient for Client {
-    fn execute_transactions(&self, transactions: &[Transaction]) -> Result<Vec<ChangeShard>, Error> {
+    fn execute_transactions(&self, transactions: &[Transaction], sender: &Address) -> Result<Vec<ChangeShard>, Error> {
         let state = Client::state_at(&self, BlockId::Latest).expect("Latest state MUST exist");
         let mut shard_ids: Vec<ShardId> = transactions.iter().flat_map(Transaction::related_shards).collect();
         shard_ids.sort_unstable();
         shard_ids.dedup();
 
-        Ok(shard_ids.iter().flat_map(|shard_id| state.apply_transactions(transactions, *shard_id)).collect())
+        Ok(shard_ids.iter().flat_map(|shard_id| state.apply_transactions(transactions, *shard_id, sender)).collect())
     }
 }
 
@@ -452,14 +498,15 @@ impl BlockChainClient for Client {
         self.transaction_address(id).and_then(|address| chain.transaction(&address))
     }
 
-    fn transaction_invoice(&self, id: TransactionId) -> Option<Invoice> {
+    fn transaction_invoice(&self, id: TransactionId) -> Option<TransactionInvoice> {
         self.transaction_address(id).and_then(|transaction_address| {
             let parcel_address = transaction_address.parcel_address.clone();
             let parcel_id = parcel_address.into();
 
             self.parcel_invoice(parcel_id).and_then(|parcel_invoice| match parcel_invoice {
                 ParcelInvoice::Multiple(invoices) => invoices.get(transaction_address.index).cloned(),
-                ParcelInvoice::Single(_) => None,
+                ParcelInvoice::SingleSuccess => None,
+                ParcelInvoice::SingleFail(_) => None,
             })
         })
     }
@@ -780,8 +827,7 @@ impl Importer {
         let db = client.state_db.read().clone_canon(header.parent_hash());
 
         let is_epoch_begin = chain.epoch_transition(parent.number(), *header.parent_hash()).is_some();
-        let enact_result =
-            enact(&block.header, &block.parcels, engine, db, &parent, client.trie_factory.clone(), is_epoch_begin);
+        let enact_result = enact(&block.header, &block.parcels, engine, db, &parent, is_epoch_begin);
         let locked_block = enact_result.map_err(|e| {
             cwarn!(CLIENT, "Block import failed for #{} ({})\nError: {:?}", header.number(), header.hash(), e);
         })?;
@@ -963,7 +1009,6 @@ impl PrepareOpenBlock for Client {
         let is_epoch_begin = chain.epoch_transition(best_header.number(), h).is_some();
         OpenBlock::new(
             engine,
-            self.trie_factory.clone(),
             self.state_db.read().clone_canon(&h),
             best_header,
             author,

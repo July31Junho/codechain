@@ -18,12 +18,14 @@ use std::fmt::{Display, Formatter, Result as FormatResult};
 
 use ckey::{Address, Error as KeyError};
 use primitives::{H256, U256};
-use unexpected::Mismatch;
+use rlp::{Decodable, DecoderError, Encodable, RlpStream, UntrustedRlp};
 
 use super::super::transaction::Error as TransactionError;
+use super::super::util::unexpected::Mismatch;
 use super::super::ShardId;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize)]
+#[serde(tag = "type", content = "content")]
 /// Errors concerning parcel processing.
 pub enum Error {
     /// Parcel is already imported to the queue
@@ -65,8 +67,6 @@ pub enum Error {
     },
     InvalidShardId(ShardId),
     InvalidShardRoot(Mismatch<H256>),
-    /// Not enough permissions given by permission contract.
-    NotAllowed,
     /// Signature error
     InvalidSignature(String),
     InconsistentShardOutcomes,
@@ -76,6 +76,110 @@ pub enum Error {
     InvalidTransferDestination,
     /// Transaction error
     InvalidTransaction(TransactionError),
+    InsufficientPermission,
+    NewOwnersMustContainSender,
+}
+
+const ERROR_ID_PARCEL_ALREADY_IMPORTED: u8 = 1u8;
+const ERROR_ID_TRANSACTION_ALREADY_IMPORTED: u8 = 2u8;
+const ERROR_ID_OLD: u8 = 3u8;
+const ERROR_ID_TOO_CHEAP_TO_REPLACE: u8 = 4u8;
+const ERROR_ID_INVALID_NETWORK_ID: u8 = 5u8;
+const ERROR_ID_METADATA_TOO_BIG: u8 = 6u8;
+const ERROR_ID_LIMIT_REACHED: u8 = 7u8;
+const ERROR_ID_INSUFFICIENT_FEE: u8 = 8u8;
+const ERROR_ID_INSUFFICIENT_BALANCE: u8 = 9u8;
+const ERROR_ID_INVALID_NONCE: u8 = 10u8;
+const ERROR_ID_INVALID_SHARD_ID: u8 = 11u8;
+const ERROR_ID_INVALID_SHARD_ROOT: u8 = 12u8;
+const ERROR_ID_INVALID_SIGNATURE: u8 = 14u8;
+const ERROR_ID_INCONSISTENT_SHARD_OUTCOMES: u8 = 15u8;
+const ERROR_ID_PARCELS_TOO_BIG: u8 = 16u8;
+const ERROR_ID_REGULAR_KEY_ALREADY_IN_USE: u8 = 17u8;
+const ERROR_ID_REGULAR_KEY_ALREADY_IN_USE_AS_MASTER: u8 = 18u8;
+const ERROR_ID_INVALID_TRANSFER_DESTINATION: u8 = 19u8;
+const ERROR_ID_INVALID_TRANSACTION: u8 = 20u8;
+const ERROR_ID_INSUFFICIENT_PERMISSION: u8 = 21u8;
+const ERROR_ID_NEW_OWNERS_MUST_CONTAIN_SENDER: u8 = 22u8;
+
+impl Encodable for Error {
+    fn rlp_append(&self, s: &mut RlpStream) {
+        match self {
+            Error::ParcelAlreadyImported => s.begin_list(1).append(&ERROR_ID_PARCEL_ALREADY_IMPORTED),
+            Error::TransactionAlreadyImported => s.begin_list(1).append(&ERROR_ID_TRANSACTION_ALREADY_IMPORTED),
+            Error::Old => s.begin_list(1).append(&ERROR_ID_OLD),
+            Error::TooCheapToReplace => s.begin_list(1).append(&ERROR_ID_TOO_CHEAP_TO_REPLACE),
+            Error::InvalidNetworkId => s.begin_list(1).append(&ERROR_ID_INVALID_NETWORK_ID),
+            Error::MetadataTooBig => s.begin_list(1).append(&ERROR_ID_METADATA_TOO_BIG),
+            Error::LimitReached => s.begin_list(1).append(&ERROR_ID_LIMIT_REACHED),
+            Error::InsufficientFee {
+                minimal,
+                got,
+            } => s.begin_list(3).append(&ERROR_ID_INSUFFICIENT_FEE).append(minimal).append(got),
+            Error::InsufficientBalance {
+                address,
+                balance,
+                cost,
+            } => s.begin_list(4).append(&ERROR_ID_INSUFFICIENT_BALANCE).append(address).append(balance).append(cost),
+            Error::InvalidNonce {
+                expected,
+                got,
+            } => s.begin_list(3).append(&ERROR_ID_INVALID_NONCE).append(expected).append(got),
+            Error::InvalidShardId(shard_id) => s.begin_list(2).append(&ERROR_ID_INVALID_SHARD_ID).append(shard_id),
+            Error::InvalidShardRoot(mismatch) => s.begin_list(2).append(&ERROR_ID_INVALID_SHARD_ROOT).append(mismatch),
+            Error::InvalidSignature(err) => s.begin_list(2).append(&ERROR_ID_INVALID_SIGNATURE).append(err),
+            Error::InconsistentShardOutcomes => s.begin_list(1).append(&ERROR_ID_INCONSISTENT_SHARD_OUTCOMES),
+            Error::ParcelsTooBig => s.begin_list(1).append(&ERROR_ID_PARCELS_TOO_BIG),
+            Error::RegularKeyAlreadyInUse => s.begin_list(1).append(&ERROR_ID_REGULAR_KEY_ALREADY_IN_USE),
+            Error::RegularKeyAlreadyInUseAsMaster => {
+                s.begin_list(1).append(&ERROR_ID_REGULAR_KEY_ALREADY_IN_USE_AS_MASTER)
+            }
+            Error::InvalidTransferDestination => s.begin_list(1).append(&ERROR_ID_INVALID_TRANSFER_DESTINATION),
+            Error::InvalidTransaction(err) => s.begin_list(2).append(&ERROR_ID_INVALID_TRANSACTION).append(err),
+            Error::InsufficientPermission => s.begin_list(1).append(&ERROR_ID_INSUFFICIENT_PERMISSION),
+            Error::NewOwnersMustContainSender => s.begin_list(1).append(&ERROR_ID_NEW_OWNERS_MUST_CONTAIN_SENDER),
+        };
+    }
+}
+
+impl Decodable for Error {
+    fn decode(rlp: &UntrustedRlp) -> Result<Self, DecoderError> {
+        let tag = rlp.val_at::<u8>(0)?;
+        Ok(match tag {
+            ERROR_ID_PARCEL_ALREADY_IMPORTED => Error::ParcelAlreadyImported,
+            ERROR_ID_TRANSACTION_ALREADY_IMPORTED => Error::TransactionAlreadyImported,
+            ERROR_ID_OLD => Error::Old,
+            ERROR_ID_TOO_CHEAP_TO_REPLACE => Error::TooCheapToReplace,
+            ERROR_ID_INVALID_NETWORK_ID => Error::InvalidNetworkId,
+            ERROR_ID_METADATA_TOO_BIG => Error::MetadataTooBig,
+            ERROR_ID_LIMIT_REACHED => Error::LimitReached,
+            ERROR_ID_INSUFFICIENT_FEE => Error::InsufficientFee {
+                minimal: rlp.val_at(1)?,
+                got: rlp.val_at(2)?,
+            },
+            ERROR_ID_INSUFFICIENT_BALANCE => Error::InsufficientBalance {
+                address: rlp.val_at(1)?,
+                balance: rlp.val_at(2)?,
+                cost: rlp.val_at(2)?,
+            },
+            ERROR_ID_INVALID_NONCE => Error::InvalidNonce {
+                expected: rlp.val_at(1)?,
+                got: rlp.val_at(2)?,
+            },
+            ERROR_ID_INVALID_SHARD_ID => Error::InvalidShardId(rlp.val_at(1)?),
+            ERROR_ID_INVALID_SHARD_ROOT => Error::InvalidShardRoot(rlp.val_at(1)?),
+            ERROR_ID_INVALID_SIGNATURE => Error::InvalidSignature(rlp.val_at(1)?),
+            ERROR_ID_INCONSISTENT_SHARD_OUTCOMES => Error::InconsistentShardOutcomes,
+            ERROR_ID_PARCELS_TOO_BIG => Error::ParcelsTooBig,
+            ERROR_ID_REGULAR_KEY_ALREADY_IN_USE => Error::RegularKeyAlreadyInUse,
+            ERROR_ID_REGULAR_KEY_ALREADY_IN_USE_AS_MASTER => Error::RegularKeyAlreadyInUseAsMaster,
+            ERROR_ID_INVALID_TRANSFER_DESTINATION => Error::InvalidTransferDestination,
+            ERROR_ID_INVALID_TRANSACTION => Error::InvalidTransaction(rlp.val_at(1)?),
+            ERROR_ID_INSUFFICIENT_PERMISSION => Error::InsufficientPermission,
+            ERROR_ID_NEW_OWNERS_MUST_CONTAIN_SENDER => Error::NewOwnersMustContainSender,
+            _ => return Err(DecoderError::Custom("Invalid parcel error")),
+        })
+    }
 }
 
 impl Display for Error {
@@ -103,7 +207,6 @@ impl Display for Error {
             } => format!("Invalid parcel nonce: expected {}, found {}", expected, got),
             Error::InvalidShardId(shard_id) => format!("{} is an invalid shard id", shard_id),
             Error::InvalidShardRoot(mismatch) => format!("Invalid shard root {}", mismatch),
-            Error::NotAllowed => "Sender does not have permissions to execute this type of transaction".into(),
             Error::InvalidSignature(err) => format!("Parcel has invalid signature: {}.", err),
             Error::InconsistentShardOutcomes => "Shard outcomes are inconsistent".to_string(),
             Error::ParcelsTooBig => "Parcel size exceeded the body size limit".to_string(),
@@ -111,6 +214,8 @@ impl Display for Error {
             Error::RegularKeyAlreadyInUseAsMaster => "The regular key is already used as a master account".to_string(),
             Error::InvalidTransferDestination => "Transfer receiver is not valid account".to_string(),
             Error::InvalidTransaction(err) => format!("Parcel has an invalid transaction: {}", err).to_string(),
+            Error::InsufficientPermission => "Sender doesn't have a permission".to_string(),
+            Error::NewOwnersMustContainSender => "New owners must contain the sender".to_string(),
         };
 
         f.write_fmt(format_args!("Parcel error ({})", msg))

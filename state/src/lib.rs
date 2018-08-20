@@ -36,7 +36,6 @@ extern crate rlp;
 extern crate rustc_hex;
 #[macro_use]
 extern crate serde_derive;
-extern crate unexpected;
 extern crate util_error;
 
 mod action_handler;
@@ -58,13 +57,14 @@ pub use db::StateDB;
 pub use error::Error as StateError;
 pub use impls::{ShardLevelState, TopLevelState};
 pub use item::account::Account;
-pub use item::asset::{Asset, AssetAddress};
+pub use item::asset::{OwnedAsset, OwnedAssetAddress};
 pub use item::asset_scheme::{AssetScheme, AssetSchemeAddress};
 pub use item::cache::{Cache, CacheableItem};
 pub use item::metadata::{Metadata, MetadataAddress};
 pub use item::regular_account::{RegularAccount, RegularAccountAddress};
 pub use item::shard::{Shard, ShardAddress};
 pub use item::shard_metadata::{ShardMetadata, ShardMetadataAddress};
+pub use item::world::{World, WorldAddress};
 pub use traits::{ShardState, ShardStateInfo, StateWithCache, TopState, TopStateInfo};
 
 pub type StateResult<T> = Result<T, StateError>;

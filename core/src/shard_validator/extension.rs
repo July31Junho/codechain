@@ -29,7 +29,7 @@ use super::client::ShardValidatorClient;
 use super::message::Message;
 
 pub struct ShardValidator {
-    account: Option<(Address, Option<String>)>,
+    account: Option<Address>,
     account_provider: Arc<AccountProvider>,
 
     api: RwLock<Option<Arc<Api>>>,
@@ -46,7 +46,7 @@ enum RegisterActionOutcome {
 }
 
 impl ShardValidator {
-    pub fn new(account: Option<(Address, Option<String>)>, account_provider: Arc<AccountProvider>) -> Arc<Self> {
+    pub fn new(account: Option<Address>, account_provider: Arc<AccountProvider>) -> Arc<Self> {
         Arc::new(Self {
             account,
             account_provider,
@@ -62,15 +62,15 @@ fn register_action(
     action: Action,
     actions: &mut HashMap<H256, Action>,
     account_provider: &AccountProvider,
-    account: &Option<(Address, Option<String>)>,
+    account: &Option<Address>,
 ) -> Result<RegisterActionOutcome, AccountProviderError> {
     let action_hash = action.hash();
 
     let t = actions.insert(action_hash, action);
 
     if t.is_none() {
-        if let Some((account, password)) = account.as_ref() {
-            account_provider.sign(*account, password.clone(), action_hash).map(RegisterActionOutcome::Signed)
+        if let Some(account) = account.as_ref() {
+            account_provider.sign(*account, None, action_hash).map(RegisterActionOutcome::Signed)
         } else {
             Ok(RegisterActionOutcome::Registered)
         }

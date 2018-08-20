@@ -16,12 +16,13 @@
 
 use ckey::{Address, Public};
 use cmerkle::Result as TrieResult;
-use ctypes::transaction::{Outcome as TransactionOutcome, Transaction};
-use ctypes::ShardId;
+use ctypes::invoice::TransactionInvoice;
+use ctypes::transaction::Transaction;
+use ctypes::{ShardId, WorldId};
 use primitives::{Bytes, H256, U256};
 
 use super::backend::{ShardBackend, TopBackend};
-use super::{Asset, AssetAddress, AssetScheme, AssetSchemeAddress, StateResult};
+use super::{AssetScheme, AssetSchemeAddress, OwnedAsset, OwnedAssetAddress, ShardMetadata, StateResult, World};
 
 
 pub trait TopStateInfo {
@@ -37,27 +38,42 @@ pub trait TopStateInfo {
     fn number_of_shards(&self) -> TrieResult<ShardId>;
 
     fn shard_root(&self, shard_id: ShardId) -> TrieResult<Option<H256>>;
+    fn shard_owners(&self, shard_id: ShardId) -> TrieResult<Option<Vec<Address>>>;
+    fn shard_users(&self, shard_id: ShardId) -> TrieResult<Option<Vec<Address>>>;
+
+    fn shard_metadata(&self, shard_id: ShardId) -> TrieResult<Option<ShardMetadata>>;
+    fn world(&self, shard_id: ShardId, world_id: WorldId) -> TrieResult<Option<World>>;
 
     /// Get the asset scheme.
     fn asset_scheme(&self, shard_id: ShardId, a: &AssetSchemeAddress) -> TrieResult<Option<AssetScheme>>;
     /// Get the asset.
-    fn asset(&self, shard_id: ShardId, a: &AssetAddress) -> TrieResult<Option<Asset>>;
+    fn asset(&self, shard_id: ShardId, a: &OwnedAssetAddress) -> TrieResult<Option<OwnedAsset>>;
 
     fn action_data(&self, key: &H256) -> TrieResult<Bytes>;
 }
 
 pub trait ShardStateInfo {
     fn root(&self) -> &H256;
+
+    fn metadata(&self) -> TrieResult<Option<ShardMetadata>>;
+    fn world(&self, world_id: WorldId) -> TrieResult<Option<World>>;
+
     /// Get the asset scheme.
     fn asset_scheme(&self, a: &AssetSchemeAddress) -> TrieResult<Option<AssetScheme>>;
     /// Get the asset.
-    fn asset(&self, a: &AssetAddress) -> TrieResult<Option<Asset>>;
+    fn asset(&self, a: &OwnedAssetAddress) -> TrieResult<Option<OwnedAsset>>;
 }
 
 pub trait ShardState<B>
 where
     B: ShardBackend, {
-    fn apply(&mut self, transaction: &Transaction) -> StateResult<TransactionOutcome>;
+    fn apply(
+        &mut self,
+        shard_id: ShardId,
+        transaction: &Transaction,
+        sender: &Address,
+        shard_owners: &[Address],
+    ) -> StateResult<TransactionInvoice>;
 }
 
 pub trait TopState<B>
@@ -89,8 +105,12 @@ where
     fn set_regular_key(&mut self, master_public: &Public, key: &Public) -> StateResult<()>;
 
     fn create_shard(&mut self, shard_creation_cost: &U256, fee_payer: &Address) -> StateResult<()>;
+    fn change_shard_owners(&mut self, shard_id: ShardId, owners: &[Address], sender: &Address) -> StateResult<()>;
+    fn change_shard_users(&mut self, shard_id: ShardId, users: &[Address], sender: &Address) -> StateResult<()>;
 
     fn set_shard_root(&mut self, shard_id: ShardId, old_root: &H256, new_root: &H256) -> StateResult<()>;
+    fn set_shard_owners(&mut self, shard_id: ShardId, new_owners: Vec<Address>) -> StateResult<()>;
+    fn set_shard_users(&mut self, shard_id: ShardId, new_users: Vec<Address>) -> StateResult<()>;
 
     fn update_action_data(&mut self, key: &H256, data: Bytes) -> StateResult<()>;
 }

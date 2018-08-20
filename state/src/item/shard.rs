@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use ccrypto::BLAKE_NULL_RLP;
+use ckey::Address;
 use ctypes::ShardId;
 use primitives::H256;
 use rlp::{Decodable, DecoderError, Encodable, RlpStream, UntrustedRlp};
@@ -24,12 +25,16 @@ use super::cache::CacheableItem;
 #[derive(Clone, Debug)]
 pub struct Shard {
     root: H256,
+    owners: Vec<Address>,
+    users: Vec<Address>,
 }
 
 impl Shard {
-    pub fn new(shard_root: H256) -> Self {
+    pub fn new(shard_root: H256, owners: Vec<Address>, users: Vec<Address>) -> Self {
         Self {
             root: shard_root,
+            owners,
+            users,
         }
     }
 
@@ -39,6 +44,24 @@ impl Shard {
 
     pub fn set_root(&mut self, root: H256) {
         self.root = root;
+    }
+
+    pub fn owners(&self) -> &[Address] {
+        debug_assert_ne!(Vec::<Address>::new(), self.owners);
+        &self.owners
+    }
+
+    pub fn set_owners(&mut self, owners: Vec<Address>) {
+        debug_assert_ne!(Vec::<Address>::new(), owners);
+        self.owners = owners;
+    }
+
+    pub fn users(&self) -> &[Address] {
+        &self.users
+    }
+
+    pub fn set_users(&mut self, users: Vec<Address>) {
+        self.users = users;
     }
 }
 
@@ -50,17 +73,17 @@ impl CacheableItem for Shard {
     }
 }
 
-const PREFIX: u8 = 'H' as u8;
+const PREFIX: u8 = super::SHARD_PREFIX;
 
 impl Encodable for Shard {
     fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_list(2).append(&PREFIX).append(&self.root);
+        s.begin_list(4).append(&PREFIX).append(&self.root).append_list(&self.owners).append_list(&self.users);
     }
 }
 
 impl Decodable for Shard {
     fn decode(rlp: &UntrustedRlp) -> Result<Self, DecoderError> {
-        if rlp.item_count()? != 2 {
+        if rlp.item_count()? != 4 {
             return Err(DecoderError::RlpInvalidLength)
         }
         let prefix = rlp.val_at::<u8>(0)?;
@@ -70,6 +93,8 @@ impl Decodable for Shard {
         }
         Ok(Self {
             root: rlp.val_at(1)?,
+            owners: rlp.list_at(2)?,
+            users: rlp.list_at(3)?,
         })
     }
 }

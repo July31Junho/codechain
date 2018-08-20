@@ -11,7 +11,7 @@ codechain-core = { path = "core" }
 codechain-discovery = { path = "discovery" }
 codechain-finally = { path = "util/finally" }
 codechain-logger = { path = "util/logger" }
-codechain-key = { path = "key", features = ["ecdsa"] }
+codechain-key = { path = "key" }
 codechain-keystore = { path = "keystore" }
 codechain-merkle = { path = "util/merkle" }
 codechain-network = { path = "network" }
@@ -33,6 +33,7 @@ primitives = { path = "util/primitives" }
 rpassword = "2.0.0"
 serde = "1.0"
 serde_derive = "1.0"
+serde_json = "1.0"
 tokio-core = "0.1.6"
 toml = "0.4"
 

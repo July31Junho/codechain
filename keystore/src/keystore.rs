@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use account::SafeAccount;
 use accounts_dir::KeyDirectory;
 use ccrypto::KEY_ITERATIONS;
-use ckey::{Address, KeyPair, Message, Public, Secret, Signature};
+use ckey::{Address, KeyPair, Message, Password, Public, Secret, Signature};
 use json::{self, OpaqueKeyFile, Uuid};
 use random::Random;
 use {Error, OpaqueSecret, SecretStore, SimpleSecretStore};
@@ -63,8 +63,12 @@ impl KeyStore {
 }
 
 impl SimpleSecretStore for KeyStore {
-    fn insert_account(&self, secret: Secret, password: &str) -> Result<Address, Error> {
-        self.store.insert_account(secret, password)
+    fn insert_account(&self, secret: Secret, password: &Password) -> Result<Address, Error> {
+        let keypair = KeyPair::from_private(secret.into()).map_err(|_| Error::CreationFailed)?;
+        match self.has_account(&keypair.address())? {
+            true => Err(Error::AlreadyExists),
+            false => self.store.insert_account(secret, password),
+        }
     }
 
     fn accounts(&self) -> Result<Vec<Address>, Error> {
@@ -75,29 +79,34 @@ impl SimpleSecretStore for KeyStore {
         self.store.has_account(account)
     }
 
-    fn change_password(&self, account: &Address, old_password: &str, new_password: &str) -> Result<(), Error> {
+    fn change_password(
+        &self,
+        account: &Address,
+        old_password: &Password,
+        new_password: &Password,
+    ) -> Result<(), Error> {
         self.store.change_password(account, old_password, new_password)
     }
 
-    fn export_account(&self, account: &Address, password: &str) -> Result<OpaqueKeyFile, Error> {
+    fn export_account(&self, account: &Address, password: &Password) -> Result<OpaqueKeyFile, Error> {
         self.store.export_account(account, password)
     }
 
-    fn remove_account(&self, account: &Address, password: &str) -> Result<(), Error> {
+    fn remove_account(&self, account: &Address, password: &Password) -> Result<(), Error> {
         self.store.remove_account(account, password)
     }
 
-    fn sign(&self, account: &Address, password: &str, message: &Message) -> Result<Signature, Error> {
+    fn sign(&self, account: &Address, password: &Password, message: &Message) -> Result<Signature, Error> {
         self.get(account)?.sign(password, message)
     }
 }
 
 impl SecretStore for KeyStore {
-    fn raw_secret(&self, account: &Address, password: &str) -> Result<OpaqueSecret, Error> {
+    fn raw_secret(&self, account: &Address, password: &Password) -> Result<OpaqueSecret, Error> {
         Ok(OpaqueSecret(self.get(account)?.crypto.secret(password)?))
     }
 
-    fn import_wallet(&self, json: &[u8], password: &str, gen_id: bool) -> Result<Address, Error> {
+    fn import_wallet(&self, json: &[u8], password: &Password, gen_id: bool) -> Result<Address, Error> {
         let json_keyfile =
             json::KeyFile::load(json).map_err(|_| Error::InvalidKeyFile("Invalid JSON format".to_string()))?;
         let mut safe_account = SafeAccount::from_file(json_keyfile, None);
@@ -111,7 +120,7 @@ impl SecretStore for KeyStore {
         self.store.import(safe_account)
     }
 
-    fn test_password(&self, account: &Address, password: &str) -> Result<bool, Error> {
+    fn test_password(&self, account: &Address, password: &Password) -> Result<bool, Error> {
         let account = self.get(account)?;
         Ok(account.check_password(password))
     }
@@ -120,8 +129,8 @@ impl SecretStore for KeyStore {
         &self,
         new_store: &SimpleSecretStore,
         account: &Address,
-        password: &str,
-        new_password: &str,
+        password: &Password,
+        new_password: &Password,
     ) -> Result<(), Error> {
         let account = self.get(account)?;
         let secret = account.crypto.secret(password)?;
@@ -129,7 +138,7 @@ impl SecretStore for KeyStore {
         Ok(())
     }
 
-    fn public(&self, account: &Address, password: &str) -> Result<Public, Error> {
+    fn public(&self, account: &Address, password: &Password) -> Result<Public, Error> {
         let account = self.get(account)?;
         account.public(password)
     }
@@ -269,7 +278,7 @@ impl KeyMultiStore {
         }
     }
 
-    fn get_matching(&self, account: &Address, password: &str) -> Result<Vec<SafeAccount>, Error> {
+    fn get_matching(&self, account: &Address, password: &Password) -> Result<Vec<SafeAccount>, Error> {
         let accounts = self.get_accounts(account)?;
 
         Ok(accounts.into_iter().filter(|acc| acc.check_password(password)).collect())
@@ -327,7 +336,7 @@ impl KeyMultiStore {
 }
 
 impl SimpleSecretStore for KeyMultiStore {
-    fn insert_account(&self, secret: Secret, password: &str) -> Result<Address, Error> {
+    fn insert_account(&self, secret: Secret, password: &Password) -> Result<Address, Error> {
         let keypair = KeyPair::from_private(secret.into()).map_err(|_| Error::CreationFailed)?;
         let id: [u8; 16] = Random::random();
         let account = SafeAccount::create(&keypair, id, password, self.iterations, "".to_string(), "{}".to_string())?;
@@ -340,14 +349,14 @@ impl SimpleSecretStore for KeyMultiStore {
     }
 
     fn has_account(&self, account: &Address) -> Result<bool, Error> {
-        let mut accounts = self.get_accounts(account)?.into_iter();
-        match accounts.next() {
-            Some(_) => Ok(true),
-            None => Ok(false),
+        match self.get_accounts(account) {
+            Ok(_) => Ok(true),
+            Err(Error::InvalidAccount) => Ok(false),
+            Err(e) => Err(e),
         }
     }
 
-    fn remove_account(&self, account_ref: &Address, password: &str) -> Result<(), Error> {
+    fn remove_account(&self, account_ref: &Address, password: &Password) -> Result<(), Error> {
         let accounts = self.get_matching(account_ref, password)?;
 
         for account in accounts {
@@ -357,7 +366,12 @@ impl SimpleSecretStore for KeyMultiStore {
         Err(Error::InvalidPassword)
     }
 
-    fn change_password(&self, account_ref: &Address, old_password: &str, new_password: &str) -> Result<(), Error> {
+    fn change_password(
+        &self,
+        account_ref: &Address,
+        old_password: &Password,
+        new_password: &Password,
+    ) -> Result<(), Error> {
         let accounts = self.get_matching(account_ref, old_password)?;
 
         if accounts.is_empty() {
@@ -373,11 +387,11 @@ impl SimpleSecretStore for KeyMultiStore {
         Ok(())
     }
 
-    fn export_account(&self, account_ref: &Address, password: &str) -> Result<OpaqueKeyFile, Error> {
+    fn export_account(&self, account_ref: &Address, password: &Password) -> Result<OpaqueKeyFile, Error> {
         self.get_matching(account_ref, password)?.into_iter().nth(0).map(Into::into).ok_or(Error::InvalidPassword)
     }
 
-    fn sign(&self, account: &Address, password: &str, message: &Message) -> Result<Signature, Error> {
+    fn sign(&self, account: &Address, password: &Password, message: &Message) -> Result<Signature, Error> {
         let accounts = self.get_matching(account, password)?;
         match accounts.first() {
             Some(ref account) => account.sign(password, message),
@@ -409,14 +423,14 @@ mod tests {
     }
 
     #[test]
-    fn should_insert_account_successfully() {
+    fn insert_account_successfully() {
         // given
         let store = store();
         let keypair = keypair();
 
         // when
         let private_key: &H256 = keypair.private();
-        let address = store.insert_account(private_key.clone(), "test").unwrap();
+        let address = store.insert_account(private_key.clone(), &"test".into()).unwrap();
 
         // then
         assert_eq!(address, keypair.address());
@@ -425,12 +439,12 @@ mod tests {
     }
 
     #[test]
-    fn should_update_meta_and_name() {
+    fn update_meta_and_name() {
         // given
         let store = store();
         let keypair = keypair();
         let private_key: &H256 = keypair.private();
-        let address = store.insert_account(private_key.clone(), "test").unwrap();
+        let address = store.insert_account(private_key.clone(), &"test".into()).unwrap();
         assert_eq!(&store.meta(&address).unwrap(), "{}");
         assert_eq!(&store.name(&address).unwrap(), "");
 
@@ -445,86 +459,86 @@ mod tests {
     }
 
     #[test]
-    fn should_remove_account() {
+    fn remove_account() {
         // given
         let store = store();
         let keypair = keypair();
         let private_key: &H256 = keypair.private();
-        let address = store.insert_account(private_key.clone(), "test").unwrap();
+        let address = store.insert_account(private_key.clone(), &"test".into()).unwrap();
 
         // when
-        store.remove_account(&address, "test").unwrap();
+        store.remove_account(&address, &"test".into()).unwrap();
 
         // then
         assert_eq!(store.accounts().unwrap().len(), 0, "Should remove account.");
     }
 
     #[test]
-    fn should_return_true_if_password_is_correct() {
+    fn return_true_if_password_is_correct() {
         // given
         let store = store();
         let keypair = keypair();
         let private_key: &H256 = keypair.private();
-        let address = store.insert_account(private_key.clone(), "test").unwrap();
+        let address = store.insert_account(private_key.clone(), &"test".into()).unwrap();
 
         // when
-        let res1 = store.test_password(&address, "x").unwrap();
-        let res2 = store.test_password(&address, "test").unwrap();
+        let res1 = store.test_password(&address, &"x".into()).unwrap();
+        let res2 = store.test_password(&address, &"test".into()).unwrap();
 
         assert!(!res1, "First password should be invalid.");
         assert!(res2, "Second password should be correct.");
     }
 
     #[test]
-    fn multistore_should_be_able_to_have_the_same_account_twice() {
+    fn multistore_can_have_the_same_account_twice() {
         // given
         let store = multi_store();
         let keypair = keypair();
         let private_key: &H256 = keypair.private();
-        let address = store.insert_account(private_key.clone(), "test").unwrap();
-        let address2 = store.insert_account(private_key.clone(), "xyz").unwrap();
+        let address = store.insert_account(private_key.clone(), &"test".into()).unwrap();
+        let address2 = store.insert_account(private_key.clone(), &"xyz".into()).unwrap();
         assert_eq!(address, address2);
 
         // when
-        assert!(store.remove_account(&address, "test").is_ok(), "First password should work.");
+        assert!(store.remove_account(&address, &"test".into()).is_ok(), "First password should work.");
         assert_eq!(store.accounts().unwrap().len(), 1);
 
-        assert!(store.remove_account(&address, "xyz").is_ok(), "Second password should work too.");
+        assert!(store.remove_account(&address, &"xyz".into()).is_ok(), "Second password should work too.");
         assert_eq!(store.accounts().unwrap().len(), 0);
     }
 
     #[test]
-    fn should_copy_account() {
+    fn copy_account() {
         // given
         let store = store();
         let multi_store = multi_store();
         let keypair = keypair();
         let private_key: &H256 = keypair.private();
-        let address = store.insert_account(private_key.clone(), "test").unwrap();
+        let address = store.insert_account(private_key.clone(), &"test".into()).unwrap();
         assert_eq!(multi_store.accounts().unwrap().len(), 0);
 
         // when
-        store.copy_account(&multi_store, &address, "test", "xyz").unwrap();
+        store.copy_account(&multi_store, &address, &"test".into(), &"xyz".into()).unwrap();
 
         // then
-        assert!(store.test_password(&address, "test").unwrap(), "First password should work for store.");
+        assert!(store.test_password(&address, &"test".into()).unwrap(), "First password should work for store.");
         assert!(
-            multi_store.sign(&address, "xyz", &Default::default()).is_ok(),
+            multi_store.sign(&address, &"xyz".into(), &Default::default()).is_ok(),
             "Second password should work for second store."
         );
         assert_eq!(multi_store.accounts().unwrap().len(), 1);
     }
 
     #[test]
-    fn should_export_account() {
+    fn export_account() {
         // given
         let store = store();
         let keypair = keypair();
         let private_key: &H256 = keypair.private();
-        let address = store.insert_account(private_key.clone(), "test").unwrap();
+        let address = store.insert_account(private_key.clone(), &"test".into()).unwrap();
 
         // when
-        let exported = store.export_account(&address, "test");
+        let exported = store.export_account(&address, &"test".into());
 
         // then
         assert!(exported.is_ok(), "Should export single account: {:?}", exported);

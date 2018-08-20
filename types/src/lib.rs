@@ -26,12 +26,13 @@ extern crate rlp_derive;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate unexpected;
 
 pub mod invoice;
 pub mod machine;
 pub mod parcel;
 pub mod transaction;
+pub mod util;
 
 pub type BlockNumber = u64;
 pub type ShardId = u16;
+pub type WorldId = u16;

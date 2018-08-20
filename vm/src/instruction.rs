@@ -46,3 +46,28 @@ pub fn is_valid_unlock_script(instrs: &[Instruction]) -> bool {
         _ => false,
     })
 }
+
+pub fn has_expensive_opcodes(instrs: &[Instruction]) -> bool {
+    let count = instrs.iter().filter(|instr| instr == &&Instruction::ChkSig).count();
+    count >= 6
+}
+
+#[test]
+fn script_with_more_than_six_chksig_opcodes() {
+    let expensive_script = vec![
+        Instruction::ChkSig,
+        Instruction::ChkSig,
+        Instruction::ChkSig,
+        Instruction::ChkSig,
+        Instruction::ChkSig,
+        Instruction::ChkSig,
+    ];
+    assert_eq!(has_expensive_opcodes(&expensive_script), true);
+}
+
+#[test]
+fn script_with_less_than_six_chksig_opcodes() {
+    let unexpensive_script =
+        vec![Instruction::ChkSig, Instruction::ChkSig, Instruction::ChkSig, Instruction::ChkSig, Instruction::ChkSig];
+    assert_eq!(has_expensive_opcodes(&unexpensive_script), false);
+}

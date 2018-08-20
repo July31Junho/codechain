@@ -507,32 +507,32 @@ mod tests {
     use tests::helpers::*;
 
     use super::super::super::error::{Error, ImportError};
-    use super::super::super::spec::Spec;
+    use super::super::super::scheme::Scheme;
     use super::kind::blocks::Unverified;
     use super::{BlockQueue, Config};
 
     // create a test block queue.
     // auto_scaling enables verifier adjustment.
     fn get_test_queue() -> BlockQueue {
-        let spec = Spec::new_test();
-        let engine = spec.engine;
+        let scheme = Scheme::new_test();
+        let engine = scheme.engine;
 
         let config = Config::default();
         BlockQueue::new(config, engine, IoChannel::disconnected(), true)
     }
 
     #[test]
-    fn can_be_created() {
+    fn create() {
         // TODO better test
-        let spec = Spec::new_test();
-        let engine = spec.engine;
+        let scheme = Scheme::new_test();
+        let engine = scheme.engine;
 
         let config = Config::default();
         let _ = BlockQueue::new(config, engine, IoChannel::disconnected(), true);
     }
 
     #[test]
-    fn can_import_blocks() {
+    fn import_blocks() {
         let queue = get_test_queue();
         if let Err(e) = queue.import(Unverified::new(get_good_dummy_block())) {
             panic!("error importing block that is valid by definition({:?})", e);
@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_error_for_duplicates() {
+    fn return_error_for_duplicates() {
         let queue = get_test_queue();
         if let Err(e) = queue.import(Unverified::new(get_good_dummy_block())) {
             panic!("error importing block that is valid by definition({:?})", e);

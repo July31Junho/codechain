@@ -15,22 +15,23 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ccore::AccountProvider;
-use ckey::{FullAddress, SignatureData};
+use ckey::{NetworkId, Password, PlatformAddress, Signature};
 use jsonrpc_core::Result;
 use primitives::H256;
 
-use super::super::errors::account_provider;
+use super::super::errors::{self, account_provider};
 use super::super::traits::Account;
 
 pub struct AccountClient {
     account_provider: Arc<AccountProvider>,
-    network_id: u64,
+    network_id: NetworkId,
 }
 
 impl AccountClient {
-    pub fn new(ap: &Arc<AccountProvider>, network_id: u64) -> Self {
+    pub fn new(ap: &Arc<AccountProvider>, network_id: NetworkId) -> Self {
         AccountClient {
             account_provider: ap.clone(),
             network_id,
@@ -39,56 +40,72 @@ impl AccountClient {
 }
 
 impl Account for AccountClient {
-    fn get_account_list(&self) -> Result<Vec<FullAddress>> {
+    fn get_account_list(&self) -> Result<Vec<PlatformAddress>> {
         self.account_provider
             .get_list()
             .map(|addresses| {
-                addresses
-                    .into_iter()
-                    .map(|address| {
-                        FullAddress::create_version0(self.network_id, address).expect("The network id is fixed")
-                    })
-                    .collect()
+                addresses.into_iter().map(|address| PlatformAddress::create(0, self.network_id, address)).collect()
             })
             .map_err(account_provider)
     }
 
-    fn create_account(&self, passphrase: Option<String>) -> Result<FullAddress> {
-        let (address, _) = self
-            .account_provider
-            .new_account_and_public(passphrase.unwrap_or_default().as_ref())
-            .map_err(account_provider)?;
-        Ok(FullAddress::create_version0(self.network_id, address).expect("The network id is fixed"))
+    fn create_account(&self, passphrase: Option<Password>) -> Result<PlatformAddress> {
+        let (address, _) =
+            self.account_provider.new_account_and_public(&passphrase.unwrap_or_default()).map_err(account_provider)?;
+        Ok(PlatformAddress::create(0, self.network_id, address))
     }
 
-    fn create_account_from_secret(&self, secret: H256, passphrase: Option<String>) -> Result<FullAddress> {
+    fn create_account_from_secret(&self, secret: H256, passphrase: Option<Password>) -> Result<PlatformAddress> {
         self.account_provider
-            .insert_account(secret.into(), passphrase.unwrap_or_default().as_ref())
-            .map(|address| FullAddress::create_version0(self.network_id, address).expect("The network id is fixed"))
+            .insert_account(secret.into(), &passphrase.unwrap_or_default())
+            .map(|address| PlatformAddress::create(0, self.network_id, address))
             .map_err(account_provider)
     }
 
-    fn remove_account(&self, full_address: FullAddress, passphrase: Option<String>) -> Result<()> {
-        self.account_provider
-            .remove_account(full_address.address, passphrase.unwrap_or_default().as_ref())
-            .map_err(account_provider)
+    fn remove_account(&self, address: PlatformAddress, passphrase: Option<Password>) -> Result<()> {
+        let address = address.try_into_address().map_err(errors::core)?;
+        self.account_provider.remove_account(address, &passphrase.unwrap_or_default()).map_err(account_provider)
     }
 
-    fn sign(
-        &self,
-        message_digest: H256,
-        full_address: FullAddress,
-        passphrase: Option<String>,
-    ) -> Result<SignatureData> {
+    fn sign(&self, message_digest: H256, address: PlatformAddress, passphrase: Option<Password>) -> Result<Signature> {
+        let address = address.try_into_address().map_err(errors::core)?;
         self.account_provider
-            .sign(full_address.address, Some(passphrase.unwrap_or_default()), message_digest)
+            .sign(address, Some(passphrase.unwrap_or_default()), message_digest)
             .map(|sig| sig.into())
             .map_err(account_provider)
     }
 
-    fn change_password(&self, full_address: FullAddress, old_password: String, new_password: String) -> Result<()> {
+    fn change_password(&self, address: PlatformAddress, old_password: Password, new_password: Password) -> Result<()> {
         self.account_provider
-            .change_password(full_address.address, &old_password, &new_password)
+            .change_password(address.into_address(), &old_password, &new_password)
             .map_err(account_provider)
+    }
+
+    fn unlock(&self, address: PlatformAddress, password: Password, duration: Option<u64>) -> Result<()> {
+        const DEFAULT_DURATION: u64 = 300;
+        match duration {
+            Some(0) => {
+                let address = address.try_into_address().map_err(errors::core)?;
+                self.account_provider
+                    .unlock_account_permanently(address, password)
+                    .map_err(Into::into)
+                    .map_err(account_provider)?
+            }
+            Some(secs) => {
+                let address = address.try_into_address().map_err(errors::core)?;
+                self.account_provider
+                    .unlock_account_timed(address, password, Duration::from_secs(secs))
+                    .map_err(Into::into)
+                    .map_err(account_provider)?
+            }
+            None => {
+                let address = address.try_into_address().map_err(errors::core)?;
+                self.account_provider
+                    .unlock_account_timed(address, password, Duration::from_secs(DEFAULT_DURATION))
+                    .map_err(Into::into)
+                    .map_err(account_provider)?
+            }
+        };
+        Ok(())
     }
 }

@@ -25,7 +25,7 @@ A base32 string that starts with "ccc" or "tcc". See [the specification](https:/
 
 ## Block
 
- - author: `H160`
+ - author: `PlatformAddress`
  - extraData: `any[]`
  - hash: `H256`
  - invoicesRoot: `H256`
@@ -61,7 +61,7 @@ A base32 string that starts with "ccc" or "tcc". See [the specification](https:/
 ### Payment Action
 
  - action: "payment"
- - receiver: `H160`
+ - receiver: `PlatformAddress`
  - amount: `U256`
 
 ### SetRegularKey Action
@@ -69,16 +69,28 @@ A base32 string that starts with "ccc" or "tcc". See [the specification](https:/
  - action: "setRegularKey"
  - key: `H512`
 
+### SetShardOwners Action
+
+ - action: "setShardOwners"
+ - shard_id: `number`
+ - owners: `PlatformAddress[]`
+
+### SetShardUsers Action
+
+ - action: "setShardUsers"
+ - shard_id: `number`
+ - users: `PlatformAddress[]`
+
 ## Transaction
 
- - type: "assetMint" | "assetTransfer"
- - data: `AssetMint` | `AssetTransfer`
+ - type: "createWorld" | "setWorldOwners" | "setWorldUsers"| "assetMint" | "assetTransfer"
+ - data: `CreateWorld` | `SetWorldOwners` | `SetWorldUsers`| `AssetMint` | `AssetTransfer`
 
 ## AssetScheme
 
  - amount: `number`
  - metadata: `string`
- - registrar: `H160` | `null`
+ - registrar: `PlatformAddress` | `null`
 
 ## Asset
 
@@ -105,17 +117,19 @@ A base32 string that starts with "ccc" or "tcc". See [the specification](https:/
 | -32009 | `Invalid RLP` | Failed to decode the RLP string |
 | -32011 | `KVDB Error` | Failed to access the state (Internal error of CodeChain) |
 | -32010 | `Execution Failed` | Failed to execute the transactions |
-| -32030 | `Verification Failed` | The signature is invalid or the network id does not match |
+| -32030 | `Verification Failed` | The signature is invalid |
 | -32031 | `Already Imported` | The same parcel is already imported |
 | -32032 | `Not Enough Balance` | The signer's balance is insufficient |
 | -32033 | `Too Low Fee` | The fee is lower than the minimum required |
 | -32034 | `Too Cheap to Replace` | The fee is lower than the existing one in the queue |
 | -32035 | `Invalid Nonce` | The signer's nonce is invalid to import |
+| -32036 | `Invalid NetworkId` | The network id does not match |
 | -32040 | `Keystore Error` | Failed to access the key store (Internal error of CodeChain) |
 | -32041 | `Key Error` | The key is invalid |
 | -32042 | `Already Exists` | The account already exists |
 | -32043 | `Wrong Password` | The password does not match |
 | -32044 | `No Such Account` | There is no such account in the key store |
+| -32099 | `Unknown Error` | An unknown error occurred |
 | -32602 | `Invalid Params` | At least one of the parameters is invalid |
 
 # List of methods
@@ -153,13 +167,24 @@ A base32 string that starts with "ccc" or "tcc". See [the specification](https:/
   * [net_connect](#net_connect)
   * [net_isConnected](#net_isconnected)
   * [net_disconnect](#net_disconnect)
-  * [net_getPeerCount](#net_getPeerCount)
-  * [net_getPort](#net_getPort)
+  * [net_getPeerCount](#net_getpeercount)
+  * [net_getPort](#net_getport)
+  * [net_addToWhitelist](#net_addtowhitelist)
+  * [net_removeFromWhitelist](#net_removefromwhitelist)
+  * [net_addToBlacklist](#net_addtoblacklist)
+  * [net_removeFromBlacklist](#net_removefromblacklist)
+  * [net_enableWhitelist](#net_enablewhitelist)
+  * [net_disableWhitelist](#net_disablewhitelist)
+  * [net_enableBlacklist](#net_enableblacklist)
+  * [net_disableBlacklist](#net_disableblacklist)
+  * [net_getWhitelist](#net_getwhitelist)
+  * [net_getBlacklist](#net_getblacklist)
 ***
  * [account_getList](#account_getlist)
  * [account_create](#account_create)
  * [account_importRaw](#account_importraw)
  * [account_remove](#account_remove)
+ * [account_unlock](#account_unlock)
  * [account_sign](#account_sign)
  * [account_changePassword](#account_changepassword)
 ***
@@ -264,7 +289,7 @@ Response Example
 {
   "jsonrpc":"2.0",
   "result":{
-    "hash":"0x56642f04d519ae3262c7ba6facf1c5b11450ebaeb7955337cfbc45420d573077",
+    "hash":"cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d70x56642f04d519ae3262c7ba6facf1c5b11450ebaeb7955337cfbc45420d573077",
     "number":1
   },
   "id":null
@@ -321,7 +346,7 @@ Response Example
 {
   "jsonrpc":"2.0",
   "result":{
-    "author":"0x84137e7a75043bed32e4458a45da7549a8169b4d",
+    "author":"cccqzzpxln6w5zrhmfju3zc53w6w4y6s95mf5lfasfn",
     "extraData":[
 
     ],
@@ -333,7 +358,7 @@ Response Example
         "action":{
           "action":"payment",
           "amount":"0xa",
-          "receiver":0xa6594b7196808d161b6fb137e781abbc251385d9
+          "receiver": "cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7"
         },
         "blockHash":"0xfc196ede542b03b55aee9f106004e7e3d7ea6a9600692e964b4735a260356b50",
         "blockNumber":5,
@@ -366,7 +391,7 @@ Params:
 
 Return Type: `H256` - parcel hash
 
-Errors: `Invalid RLP`, `Verification Failed`, `Already Imported`, `Not Enough Balance`, `Too Low Fee`, `Too Cheap to Replace`, `Invalid Nonce`, `Invalid Params`
+Errors: `Invalid RLP`, `Verification Failed`, `Already Imported`, `Not Enough Balance`, `Too Low Fee`, `Too Cheap to Replace`, `Invalid Nonce`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example:
 ```
@@ -411,7 +436,7 @@ Response Example
         "action": {
           "action":"payment",
           "amount":"0xa",
-          "receiver":0xa6594b7196808d161b6fb137e781abbc251385d9
+          "receiver": "cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7"
         },
         "blockHash": "0xfc196ede542b03b55aee9f106004e7e3d7ea6a9600692e964b4735a260356b50",
         "blockNumber": 5,
@@ -525,6 +550,7 @@ Gets an asset scheme with the given asset type.
 Params:
  1. transaction hash of AssetMintTransaction - `H256`
  2. shard id - `number`
+ 3. world_id - `number`
 
 Return Type: `null` | `AssetScheme`
 
@@ -534,7 +560,7 @@ Request Example
 ```
   curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "chain_getAssetSchemeByHash", "params": ["0x24df02abcd4e984e90253dc344e89b8431bbb319c66643bfef566dfdf46ec6bc", 0], "id": null}' \
+    -d '{"jsonrpc": "2.0", "method": "chain_getAssetSchemeByHash", "params": ["0x24df02abcd4e984e90253dc344e89b8431bbb319c66643bfef566dfdf46ec6bc", 0, 0], "id": null}' \
     localhost:8080
 ```
 
@@ -619,12 +645,13 @@ Response Example
 ```
 
 ## chain_isAssetSpent
-(not implemented) Check whether an asset was spent or not.
+Checks whether an asset is spent or not.
 
 Params:
- 1. transaction hash - `H256`
- 2. index - `number`
- 3. block number: `number` | `null`
+ 1. transaction hash: `H256`
+ 2. index: `number`
+ 3. shard id: `number`
+ 4. block number: `number` | `null`
 
 Return Type: `null` | `false` | `true` - It returns null when no such asset exists.
 
@@ -632,7 +659,7 @@ Request Example
 ```
   curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "chain_isAssetSpent", "params": ["0x24df02abcd4e984e90253dc344e89b8431bbb319c66643bfef566dfdf46ec6bc", 0], "id": null}' \
+    -d '{"jsonrpc": "2.0", "method": "chain_isAssetSpent", "params": ["0x24df02abcd4e984e90253dc344e89b8431bbb319c66643bfef566dfdf46ec6bc", 0, 0], "id": null}' \
     localhost:8080
 ```
 
@@ -649,18 +676,18 @@ Response Example
 Gets a nonce of an account of the given address, at state of the given blockNumber.
 
 Params:
- 1. address: `H160`
+ 1. address: `PlatformAddress`
  2. block number: `number` | `null`
 
 Return Type: `U256`
 
-Errors: `KVDB Error`, `Invalid Params`
+Errors: `KVDB Error`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example
 ```
   curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "chain_getNonce", "params": ["0xa6594b7196808d161b6fb137e781abbc251385d9", null], "id": null}' \
+    -d '{"jsonrpc": "2.0", "method": "chain_getNonce", "params": ["cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7", null], "id": null}' \
     localhost:8080
 ```
 
@@ -677,18 +704,18 @@ Response Example
 Gets a balance of an account of the given address, at the state of the given blockNumber.
 
 Params:
- 1. address: `H160`
+ 1. address: `PlatformAddress`
  2. block number: `number` | `null`
 
 Return Type: `U256`
 
-Errors: `KVDB Error`, `Invalid Params`
+Errors: `KVDB Error`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example
 ```
   curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "chain_getBalance", "params": ["0xa6594b7196808d161b6fb137e781abbc251385d9", null], "id": null}' \
+    -d '{"jsonrpc": "2.0", "method": "chain_getBalance", "params": ["cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7", null], "id": null}' \
     localhost:8080
 ```
 
@@ -705,18 +732,18 @@ Response Example
 Gets the regular key of an account of the given address, at the state of the given blockNumber.
 
 Params:
- 1. address: `H160`
+ 1. address: `PlatformAddress`
  2. block number: `number` | `null`
 
 Return Type: `H512` - 512-bit public key
 
-Errors: `KVDB Error`, `Invalid Params`
+Errors: `KVDB Error`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example
 ```
   curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "chain_getRegularKey", "params": ["0xa6594b7196808d161b6fb137e781abbc251385d9", null], "id": null}' \
+    -d '{"jsonrpc": "2.0", "method": "chain_getRegularKey", "params": ["cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7", null], "id": null}' \
     localhost:8080
 ```
 
@@ -819,8 +846,7 @@ Response Example
         {
           "payment":{
             "nonce":"0x1",
-            "receiver":"0xa6594b7196808d161b6fb137e781abbc251385d9",
-            "sender":"0xa6594b7196808d161b6fb137e781abbc251385d9",
+            "receiver": "cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7",
             "value":"0x0"
           }
         }
@@ -837,7 +863,7 @@ Gets coinbase's account id.
 
 Params: No parameters
 
-Return Type: `H160` | `null`
+Return Type: `PlatformAddress` | `null`
 
 Request Example
 ```
@@ -851,7 +877,7 @@ Response Example
 ```
 {
   "jsonrpc":"2.0",
-  "result":"0xa6594b7196808d161b6fb137e781abbc251385d9",
+  "result":"cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7",
   "id":null
 }
 ```
@@ -860,17 +886,18 @@ Response Example
 Executes the transactions and returns the current shard root and the changed shard root.
 
 Params:
- 1. transactions: `hexadecimal string` - RLP encoded hex string of `Transaction[]`
+ 1. transactions: `Transaction[]`
+ 2. sender: `PlatformAddress`
 
 Return Type: `ChangeShard[]`
 
-Errors: `Invalid RLP`, `Execution Failed`, `Invalid Params`
+Errors: `Invalid RLP`, `Execution Failed`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example
 ```
   curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "chain_executeTransactions", "params": ["0xf8c8f8630311809e6d65746164617461206f66207065726d697373696f6e6564206173736574a007feab4c39250abf60b77d7589a5b61fdf409bd837e936376381d19db1e1f050c0c7865af3107a4000d5943f4aa1fedf1f54eeb03b759deadb36676b18491180f861031101a26d65746164617461206f66206e6f6e2d7065726d697373696f6e6564206173736574a007feab4c39250abf60b77d7589a5b61fdf409bd837e936376381d19db1e1f050c0c164d5943f4aa1fedf1f54eeb03b759deadb36676b18491180"], "id": null}' \
+    -d '{"jsonrpc": "2.0", "method": "chain_executeTransactions", "params": [[{"type":"assetMint","data":{"networkId":"17","shardId":0,"worldId":0,"metadata":"{\"name\":\"Gold\",\"description\":\"An asset example\",\"icon_url\":\"https://gold.image/\"}","output":{"lockScriptHash":"0xf42a65ea518ba236c08b261c34af0521fa3cd1aa505e1c18980919cb8945f8f3","parameters":[],"amount":10000},"registrar":null,"nonce":0}}, {"type":"assetMint","data":{"networkId":"17","shardId":1,"worldId":0,"metadata":"{\"name\":\"Gold\",\"description\":\"An asset example\",\"icon_url\":\"https://gold.image/\"}","output":{"lockScriptHash":"0xf42a65ea518ba236c08b261c34af0521fa3cd1aa505e1c18980919cb8945f8f3","parameters":[],"amount":10000},"registrar":null,"nonce":0}}], "cccqzn9jjm3j6qg69smd7cn0eup4w7z2yu9myd6c4d7"], "id": null}' \
     localhost:8080
 ```
 
@@ -894,7 +921,7 @@ Response Example
 ```
 
 ## chain_getNetworkId
-(not implemented) Return the nework id that is used in this chain.
+Return the nework id that is used in this chain.
 
 Params: No parameters
 
@@ -1046,7 +1073,7 @@ Request Example
 ```
   curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "net_isConnected", "params": ["192.168.0.3", "3485"], "id": 6}' \
+    -d '{"jsonrpc": "2.0", "method": "net_isConnected", "params": ["192.168.0.3", 3485], "id": 6}' \
     localhost:8080
 ```
 
@@ -1066,7 +1093,7 @@ Params:
  1. address: `string`
  1. port: `number`
 
-Return Type: `bool`
+Return Type: null
 
 Errors: `Not Conntected`, `Invalid Params`
 
@@ -1082,13 +1109,13 @@ Response Example
 ```
 {
   "jsonrpc":"2.0",
-  "result":true,
+  "result":null,
   "id":6
 }
 ```
 
 ## net_getPeerCount
-(not implemented) Return the count of peers which the client is connected to.
+Return the count of peers which the client is connected to.
 
 Params: No parameters
 
@@ -1113,7 +1140,7 @@ Response Example
 
 
 ## net_getPort
-(not implemented) Return the port number on which the client is listening for peers.
+Return the port number on which the client is listening for peers.
 
 Params: No parameters
 
@@ -1132,6 +1159,248 @@ Response Example
 {
   "jsonrpc":"2.0",
   "result": 3485,
+  "id":6
+}
+```
+
+## net_addToWhitelist
+(not implemented) Adds the address to the white list.
+
+Params:
+ 1. address: `string`
+
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_addToWhitelist", "params": ["1.2.3.4"], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_removeFromWhitelist
+(not implemented) Removes the address from the white list.
+
+Params:
+ 1. address: `string`
+
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_removeFromWhitelist", "params": ["1.2.3.4"], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_addToBlacklist
+(not implemented) Adds the address to the white list.
+
+Params:
+ 1. address: `string`
+
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_addToBlacklist", "params": ["1.2.3.4"], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_removeFromBlacklist
+(not implemented) Removes the address from the white list.
+
+Params:
+ 1. address: `string`
+
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_removeFromBlacklist", "params": ["1.2.3.4"], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_enableWhitelist
+(not implemented) Enables white list.
+
+Params: No parameters
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_enableWhitelist", "params": [], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_disableWhitelist
+(not implemented) Disables white list.
+
+Params: No parameters
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_disableWhitelist", "params": [], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_enableBlacklist
+(not implemented) Enables black list.
+
+Params: No parameters
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_enableBlacklist", "params": [], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_disableBlacklist
+(not implemented) Disables black list.
+
+Params: No parameters
+Return Type: `null`
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_disableBlacklist", "params": [], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
+  "id":6
+}
+```
+
+## net_getWhitelist
+(not implemented) Gets the address in the white list.
+
+Params:
+ 1. address: `string`
+
+Return Type: { list: `string[]`, enabled: `bool` }
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_getWhitelist", "params": [], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": { "list": ["1.2.3.4", "1.2.3.5", "1.2.3.6"], "enabled": true },
+  "id":6
+}
+```
+
+## net_getBlacklist
+(not implemented) Gets the address in the white list.
+
+Params:
+ 1. address: `string`
+
+Return Type: { list: `string[]`, enabled: `bool` }
+
+Request Example
+```
+  curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "net_getBlacklist", "params": [], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": { "list": ["1.2.3.4", "1.2.3.5", "1.2.3.6"], "enabled": false },
   "id":6
 }
 ```
@@ -1157,7 +1426,7 @@ Response Example
 ```
 {
   "jsonrpc":"2.0",
-  "result":["0x318def87d8dc0f7cc21794daf2dd36762db22b67"],
+  "result":["cccqqccmmu8mrwq7lxzz72d4ukaxemzmv3tvues8uwy"],
   "id":6
 }
 ```
@@ -1184,7 +1453,7 @@ Response Example
 ```
 {
   "jsonrpc":"2.0",
-  "result":"0x318def87d8dc0f7cc21794daf2dd36762db22b67",
+  "result":"cccqqccmmu8mrwq7lxzz72d4ukaxemzmv3tvues8uwy",
   "id":6
 }
 ```
@@ -1212,7 +1481,7 @@ Response Example
 ```
 {
   "jsonrpc":"2.0",
-  "result":"0xa22ae626d26923bdd9321e648de080c18e1049f2",
+  "result":"cccqz3z4e3x6f5j80wexg0xfr0qsrqcuyzf7g4y0je6",
   "id":6
 }
 ```
@@ -1226,13 +1495,13 @@ Params:
 
 Return type: `null`
 
-Errors: `Keystore Error`, `Wrong Password`, `No Such Account`, `Invalid Params`
+Errors: `Keystore Error`, `Wrong Password`, `No Such Account`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example
 ```
 curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "account_remove", "params": ["1228c0de48fdc303b4b7f51049ae2887358f94b6"], "id": 6}' \
+    -d '{"jsonrpc": "2.0", "method": "account_remove", "params": ["cccqqfz3sx7fr7uxqa5kl63qjdw9zrntru5kcdsjywj"], "id": 6}' \
 ```
 
 Response Example
@@ -1240,6 +1509,37 @@ Response Example
 {
   "jsonrpc":"2.0",
   "result":null,
+  "id":6
+}
+```
+
+## account_unlock
+Unlocks the specified account for use.
+
+It will default to 300 seconds. Passing 0 unlocks the account indefinitely.
+
+Params:
+ 1. account: `PlatformAddress`
+ 2. password: `string`
+ 3. duration: `number`  | `null`
+
+Return type: `null`
+
+Errors: `Keystore Error`, `Wrong Password`, `No Such Account`, `Invalid Params`, `Invalid NetworkId`
+
+Request Example
+```
+curl \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc": "2.0", "method": "account_unlock", "params": ["cccqqccmmu8mrwq7lxzz72d4ukaxemzmv3tvues8uwy", "1234", 0], "id": 6}' \
+    localhost:8080
+```
+
+Response Example
+```
+{
+  "jsonrpc":"2.0",
+  "result": null,
   "id":6
 }
 ```
@@ -1254,13 +1554,13 @@ Params:
 
 Return type: `Signature`
 
-Errors: `Keystore Error`, `Wrong Password`, `No Such Account`, `Invalid Params`
+Errors: `Keystore Error`, `Wrong Password`, `No Such Account`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example
 ```
 curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "account_sign", "params": ["0000000000000000000000000000000000000000000000000000000000000000", "1228c0de48fdc303b4b7f51049ae2887358f94b6"], "id": 6}' \
+    -d '{"jsonrpc": "2.0", "method": "account_sign", "params": ["0000000000000000000000000000000000000000000000000000000000000000", "cccqqfz3sx7fr7uxqa5kl63qjdw9zrntru5kcdsjywj"], "id": 6}' \
     localhost:8080
 ```
 
@@ -1283,13 +1583,13 @@ Params:
 
 Return Type: `null`
 
-Errors: `Keystore Error`, `Wrong Password`, `No Such Account`, `Invalid Params`
+Errors: `Keystore Error`, `Wrong Password`, `No Such Account`, `Invalid Params`, `Invalid NetworkId`
 
 Request Example
 ```
 curl \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc": "2.0", "method": "account_changePassword", "params": ["0x318def87d8dc0f7cc21794daf2dd36762db22b67", "1234", "5678"], "id": 6}' \
+    -d '{"jsonrpc": "2.0", "method": "account_changePassword", "params": ["cccqqccmmu8mrwq7lxzz72d4ukaxemzmv3tvues8uwy", "1234", "5678"], "id": 6}' \
     localhost:8080
 ```
 

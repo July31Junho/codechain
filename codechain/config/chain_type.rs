@@ -17,7 +17,7 @@
 use std::str::FromStr;
 use std::{fmt, fs};
 
-use ccore::Spec;
+use ccore::Scheme;
 
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +27,7 @@ pub enum ChainType {
     Tendermint,
     Cuckoo,
     BlakePoW,
+    Husky,
     Custom(String),
 }
 
@@ -40,15 +41,16 @@ impl FromStr for ChainType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let spec = match s {
+        let scheme = match s {
             "solo" => ChainType::Solo,
             "solo_authority" => ChainType::SoloAuthority,
             "tendermint" => ChainType::Tendermint,
             "cuckoo" => ChainType::Cuckoo,
             "blake_pow" => ChainType::BlakePoW,
+            "husky" => ChainType::Husky,
             other => ChainType::Custom(other.into()),
         };
-        Ok(spec)
+        Ok(scheme)
     }
 }
 
@@ -60,23 +62,25 @@ impl fmt::Display for ChainType {
             ChainType::Tendermint => "tendermint",
             ChainType::Cuckoo => "cuckoo",
             ChainType::BlakePoW => "blake_pow",
+            ChainType::Husky => "husky",
             ChainType::Custom(custom) => custom,
         })
     }
 }
 
 impl ChainType {
-    pub fn spec<'a>(&self) -> Result<Spec, String> {
+    pub fn scheme<'a>(&self) -> Result<Scheme, String> {
         match self {
-            ChainType::Solo => Ok(Spec::new_test_solo()),
-            ChainType::SoloAuthority => Ok(Spec::new_test_solo_authority()),
-            ChainType::Tendermint => Ok(Spec::new_test_tendermint()),
-            ChainType::Cuckoo => Ok(Spec::new_test_cuckoo()),
-            ChainType::BlakePoW => Ok(Spec::new_test_blake_pow()),
+            ChainType::Solo => Ok(Scheme::new_test_solo()),
+            ChainType::SoloAuthority => Ok(Scheme::new_test_solo_authority()),
+            ChainType::Tendermint => Ok(Scheme::new_test_tendermint()),
+            ChainType::Cuckoo => Ok(Scheme::new_test_cuckoo()),
+            ChainType::BlakePoW => Ok(Scheme::new_test_blake_pow()),
+            ChainType::Husky => Ok(Scheme::new_husky()),
             ChainType::Custom(filename) => {
                 let file = fs::File::open(filename)
                     .map_err(|e| format!("Could not load specification file at {}: {}", filename, e))?;
-                Spec::load(file)
+                Scheme::load(file)
             }
         }
     }

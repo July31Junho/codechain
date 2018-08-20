@@ -44,7 +44,7 @@ args:
     - chain:
         short: c
         long: chain
-        help: Set the blockchain type out of solo, solo_authority, tendermint, cuckoo, blake_pow or a path to chain spec file.
+        help: Set the blockchain type out of solo, solo_authority, tendermint, cuckoo, blake_pow, husky or a path to chain scheme file.
         takes_value: true
     - db-path:
         long: db-path
@@ -106,7 +106,7 @@ args:
         takes_value: true
     - password-path:
         long: password-path
-        help: Specify the engine signer's password file path.
+        help: Specify the password file path.
         takes_value: true
     - mem-pool-mem-limit:
         long: mem-pool-mem-limit
@@ -128,6 +128,15 @@ args:
         long: force-sealing
         help: Force the node to author new blocks as if it were always sealing/mining.
         takes_value: false
+    - reseal-on-txs:
+        long: reseal-on-txs
+        help: Specify which transactions should force the node to reseal a block.
+        takes_value: true
+        possible_values:
+            - none
+            - own
+            - ext
+            - all
     - reseal-min-period:
         long: reseal-min-period
         value_name: MS
@@ -191,13 +200,6 @@ args:
         takes_value: true
         conflicts_with:
             - no-shard-validator
-    - shard-validator-password-path:
-        long: shard-validator-password-path
-        value_name: PATH
-        help: Specify the password path of account for shard validator.
-        takes_value: true
-        conflicts_with:
-            - no-shard-validator
 subcommands:
     - account:
         about: account managing commands
@@ -206,6 +208,11 @@ subcommands:
                 long: keys-path
                 value_name: PATH
                 help: Specify the path for JSON key files to be found
+                takes_value: true
+            - chain:
+                short: c
+                long: chain
+                help: Set the blockchain type out of solo, solo_authority, tendermint, cuckoo, blake_pow, husky or a path to chain scheme file.
                 takes_value: true
         subcommands:
             - create:

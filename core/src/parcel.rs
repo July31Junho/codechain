@@ -17,7 +17,7 @@
 use std::ops::Deref;
 
 use ccrypto::blake256;
-use ckey::{self, public_to_address, recover, sign, Address, Private, Public, Signature, SignatureData};
+use ckey::{self, public_to_address, recover, sign, Address, Private, Public, Signature};
 use ctypes::parcel::{Action, Error as ParcelError, Parcel};
 use ctypes::transaction::Transaction;
 use ctypes::BlockNumber;
@@ -25,7 +25,7 @@ use heapsize::HeapSizeOf;
 use primitives::H256;
 use rlp::{self, DecoderError, Encodable, RlpStream, UntrustedRlp};
 
-use super::spec::CommonParams;
+use super::scheme::CommonParams;
 
 /// Signed parcel information without verified signature.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -33,7 +33,7 @@ pub struct UnverifiedParcel {
     /// Plain Parcel.
     unsigned: Parcel,
     /// Signature.
-    sig: SignatureData,
+    sig: Signature,
     /// Hash of the parcel
     hash: H256,
 }
@@ -138,31 +138,41 @@ impl UnverifiedParcel {
         match &self.action {
             Action::ChangeShardState {
                 transactions,
+                changes,
                 ..
             } => {
+                let shard_ids: Vec<_> = changes.iter().map(|c| c.shard_id).collect();
                 for t in transactions {
                     t.verify()?;
+                    if t.network_id() != self.network_id {
+                        return Err(ParcelError::InvalidNetworkId)
+                    }
+                    for shard_id in t.related_shards() {
+                        if !shard_ids.contains(&shard_id) {
+                            return Err(ParcelError::InvalidShardId(shard_id))
+                        }
+                    }
                     match &t {
+                        Transaction::CreateWorld {
+                            ..
+                        } => {}
+                        Transaction::SetWorldOwners {
+                            ..
+                        } => {}
+                        Transaction::SetWorldUsers {
+                            ..
+                        } => {}
                         Transaction::AssetMint {
-                            network_id,
                             metadata,
                             ..
                         } => {
                             if metadata.len() > params.max_metadata_size {
                                 return Err(ParcelError::MetadataTooBig)
                             }
-                            if network_id != &self.network_id {
-                                return Err(ParcelError::InvalidNetworkId)
-                            }
                         }
                         Transaction::AssetTransfer {
-                            network_id,
                             ..
-                        } => {
-                            if network_id != &self.network_id {
-                                return Err(ParcelError::InvalidNetworkId)
-                            }
-                        }
+                        } => {}
                     }
                 }
             }
@@ -278,23 +288,23 @@ impl Deref for LocalizedParcel {
 
 #[cfg(test)]
 mod tests {
-    use ckey::{Address, Public, SignatureData};
+    use ckey::{Address, Public, Signature};
     use ctypes::transaction::AssetMintOutput;
     use primitives::H256;
 
     use super::*;
 
     #[test]
-    fn test_unverified_parcel_rlp() {
+    fn unverified_parcel_rlp() {
         rlp_encode_and_decode_test!(
             UnverifiedParcel {
                 unsigned: Parcel {
                     nonce: 0.into(),
                     fee: 10.into(),
                     action: Action::CreateShard,
-                    network_id: 0xBE,
+                    network_id: "tc".into(),
                 },
-                sig: SignatureData::default(),
+                sig: Signature::default(),
                 hash: H256::default(),
             }.compute_hash()
         );
@@ -303,8 +313,9 @@ mod tests {
     #[test]
     fn encode_and_decode_asset_mint() {
         rlp_encode_and_decode_test!(Transaction::AssetMint {
-            network_id: 200,
+            network_id: "tc".into(),
             shard_id: 0xc,
+            world_id: 0xA,
             metadata: "mint test".to_string(),
             output: AssetMintOutput {
                 lock_script_hash: H256::random(),
@@ -319,8 +330,9 @@ mod tests {
     #[test]
     fn encode_and_decode_asset_mint_with_parameters() {
         rlp_encode_and_decode_test!(Transaction::AssetMint {
-            network_id: 200,
+            network_id: "tc".into(),
             shard_id: 3,
+            world_id: 0xB,
             metadata: "mint test".to_string(),
             output: AssetMintOutput {
                 lock_script_hash: H256::random(),
@@ -337,7 +349,7 @@ mod tests {
         let burns = vec![];
         let inputs = vec![];
         let outputs = vec![];
-        let network_id = 0;
+        let network_id = "tc".into();
         rlp_encode_and_decode_test!(Transaction::AssetTransfer {
             network_id,
             burns,
@@ -362,13 +374,13 @@ mod tests {
                 unsigned: Parcel {
                     nonce: 30.into(),
                     fee: 40.into(),
-                    network_id: 50,
+                    network_id: "tc".into(),
                     action: Action::Payment {
                         receiver: Address::random(),
                         amount: 300.into(),
                     },
                 },
-                sig: SignatureData::default(),
+                sig: Signature::default(),
                 hash: H256::default(),
             }.compute_hash()
         );
@@ -381,12 +393,12 @@ mod tests {
                 unsigned: Parcel {
                     nonce: 30.into(),
                     fee: 40.into(),
-                    network_id: 50,
+                    network_id: "tc".into(),
                     action: Action::SetRegularKey {
                         key: Public::random(),
                     },
                 },
-                sig: SignatureData::default(),
+                sig: Signature::default(),
                 hash: H256::default(),
             }.compute_hash()
         );
@@ -399,10 +411,10 @@ mod tests {
                 unsigned: Parcel {
                     nonce: 30.into(),
                     fee: 40.into(),
-                    network_id: 50,
+                    network_id: "tc".into(),
                     action: Action::CreateShard,
                 },
-                sig: SignatureData::default(),
+                sig: Signature::default(),
                 hash: H256::default(),
             }.compute_hash()
         );

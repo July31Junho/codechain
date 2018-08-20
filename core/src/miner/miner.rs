@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ckey::Address;
+use ckey::{Address, Password};
 use cstate::{StateError, TopLevelState};
 use ctypes::parcel::Error as ParcelError;
 use ctypes::BlockNumber;
@@ -32,7 +32,7 @@ use super::super::consensus::{CodeChainEngine, EngineType, Seal};
 use super::super::error::Error;
 use super::super::header::Header;
 use super::super::parcel::{SignedParcel, UnverifiedParcel};
-use super::super::spec::Spec;
+use super::super::scheme::Scheme;
 use super::super::types::{BlockId, ParcelId};
 use super::mem_pool::{AccountDetails, MemPool, ParcelOrigin, RemovalReason};
 use super::sealing_queue::SealingQueue;
@@ -67,7 +67,7 @@ impl Default for MinerOptions {
         MinerOptions {
             new_work_notify: vec![],
             force_sealing: false,
-            reseal_on_external_parcel: false,
+            reseal_on_external_parcel: true,
             reseal_on_own_parcel: true,
             reseal_min_period: Duration::from_secs(2),
             reseal_max_period: Duration::from_secs(120),
@@ -105,15 +105,15 @@ impl Miner {
         self.notifiers.write().push(notifier);
     }
 
-    pub fn new(options: MinerOptions, spec: &Spec, accounts: Option<Arc<AccountProvider>>) -> Arc<Self> {
-        Arc::new(Self::new_raw(options, spec, accounts))
+    pub fn new(options: MinerOptions, scheme: &Scheme, accounts: Option<Arc<AccountProvider>>) -> Arc<Self> {
+        Arc::new(Self::new_raw(options, scheme, accounts))
     }
 
-    pub fn with_spec(spec: &Spec) -> Self {
-        Self::new_raw(Default::default(), spec, None)
+    pub fn with_scheme(scheme: &Scheme) -> Self {
+        Self::new_raw(Default::default(), scheme, None)
     }
 
-    fn new_raw(options: MinerOptions, spec: &Spec, accounts: Option<Arc<AccountProvider>>) -> Self {
+    fn new_raw(options: MinerOptions, scheme: &Scheme, accounts: Option<Arc<AccountProvider>>) -> Self {
         let mem_limit = options.mem_pool_memory_limit.unwrap_or_else(usize::max_value);
         let mem_pool = Arc::new(RwLock::new(MemPool::with_limits(options.mem_pool_size, mem_limit)));
         let notifiers: Vec<Box<NotifyWork>> = match options.new_work_notify.is_empty() {
@@ -131,9 +131,9 @@ impl Miner {
             sealing_block_last_request: Mutex::new(0),
             sealing_work: Mutex::new(SealingWork {
                 queue: SealingQueue::new(options.work_queue_size),
-                enabled: options.force_sealing || spec.engine.seals_internally().is_some(),
+                enabled: options.force_sealing || scheme.engine.seals_internally().is_some(),
             }),
-            engine: spec.engine.clone(),
+            engine: scheme.engine.clone(),
             options,
             accounts,
             notifiers: RwLock::new(notifiers),
@@ -367,7 +367,6 @@ impl Miner {
         };
 
         let mut invalid_parcels = HashSet::new();
-        let mut non_allowed_parcels = HashSet::new();
         let block_number = open_block.block().header().number();
 
         let mut parcel_count: usize = 0;
@@ -377,7 +376,6 @@ impl Miner {
             let start = Instant::now();
             // Check whether parcel type is allowed for sender
             let result = match self.engine.machine().verify_parcel(&parcel, open_block.header(), chain) {
-                err @ Err(Error::State(StateError::Parcel(ParcelError::NotAllowed))) => err,
                 _ => open_block.push_parcel(parcel, None),
             };
             let took = start.elapsed();
@@ -386,10 +384,6 @@ impl Miner {
             match result {
                 // already have parcel - ignore
                 Err(Error::State(StateError::Parcel(ParcelError::ParcelAlreadyImported))) => {}
-                Err(Error::State(StateError::Parcel(ParcelError::NotAllowed))) => {
-                    non_allowed_parcels.insert(hash);
-                    cdebug!(MINER, "Skipping non-allowed parcel for sender {:?}", hash);
-                }
                 Err(e) => {
                     invalid_parcels.insert(hash);
                     cdebug!(
@@ -421,9 +415,6 @@ impl Miner {
             let mut queue = self.mem_pool.write();
             for hash in invalid_parcels {
                 queue.remove(&hash, &fetch_nonce, RemovalReason::Invalid);
-            }
-            for hash in non_allowed_parcels {
-                queue.remove(&hash, &fetch_nonce, RemovalReason::NotAllowed);
             }
         }
         (block, original_work_hash)
@@ -526,32 +517,18 @@ impl MinerService for Miner {
         *self.author.read()
     }
 
-    fn set_author(&self, author: Address) {
-        ctrace!(MINER, "Set author to {:?}", author);
-        if self.engine.seals_internally().is_some() {
-            let mut sealing_work = self.sealing_work.lock();
-            sealing_work.enabled = true;
-        }
-        *self.author.write() = author;
-    }
+    fn set_author(&self, address: Address, password: Option<Password>) -> Result<(), SignError> {
+        *self.author.write() = address;
 
-    fn extra_data(&self) -> Bytes {
-        self.extra_data.read().clone()
-    }
-
-    fn set_extra_data(&self, extra_data: Bytes) {
-        *self.extra_data.write() = extra_data;
-    }
-
-    fn set_engine_signer(&self, address: Address, password: String) -> Result<(), SignError> {
         if self.engine.seals_internally().is_some() {
             if let Some(ref ap) = self.accounts {
-                ctrace!(MINER, "Set engine signer to {:?}", address);
+                ctrace!(MINER, "Set author to {:?}", address);
+                // Sign test message
+                ap.sign(address, password.clone(), Default::default())?;
                 // Limit the scope of the locks.
                 {
                     let mut sealing_work = self.sealing_work.lock();
                     sealing_work.enabled = true;
-                    *self.author.write() = address;
                 }
                 self.engine.set_signer(ap.clone(), address, password);
                 Ok(())
@@ -560,9 +537,16 @@ impl MinerService for Miner {
                 Err(SignError::NotFound)
             }
         } else {
-            cwarn!(MINER, "Cannot set engine signer on a PoW chain.");
-            Err(SignError::InappropriateChain)
+            Ok(())
         }
+    }
+
+    fn extra_data(&self) -> Bytes {
+        self.extra_data.read().clone()
+    }
+
+    fn set_extra_data(&self, extra_data: Bytes) {
+        *self.extra_data.write() = extra_data;
     }
 
     fn minimal_fee(&self) -> U256 {
